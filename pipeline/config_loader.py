@@ -12,7 +12,9 @@ import json
 import os
 import ssl
 import urllib.request
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import cast
 
 if __package__:
     from .runtime_policy import JsonObject, resolve_runtime_policy
@@ -38,6 +40,107 @@ REPO = PROJECT_ROOT  # backward compat alias
 _config_cache = None
 _user_id_cache = None
 _collection_key_cache = None
+
+
+def _windows_known_profile() -> Path:
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    result = cast(
+        int,
+        ctypes.windll.shell32.SHGetFolderPathW(
+            None,
+            40,
+            None,
+            0,
+            buffer,
+        ),
+    )
+    value = cast(str, buffer.value)
+    if result != 0 or not value:
+        raise ValueError("profile-unavailable")
+    return Path(value)
+
+
+def resolve_user_profile(
+    environment: Mapping[str, str] | None = None,
+    *,
+    known_folder: Callable[[], Path] | None = None,
+) -> Path:
+    """Resolve one explicit profile boundary without calling Path.home()."""
+    source = os.environ if environment is None else environment
+    declared = source.get("USERPROFILE", "").strip()
+    home = source.get("HOME", "").strip()
+    drive = source.get("HOMEDRIVE", "").strip()
+    tail = source.get("HOMEPATH", "").strip()
+    drive_home = drive + tail if drive and tail else ""
+    values = [value for value in (declared, home, drive_home) if value]
+    if values:
+        declared_paths = [Path(value) for value in values]
+        for path in declared_paths:
+            if (
+                not path.is_absolute()
+                or path.is_symlink()
+                or path.is_junction()
+            ):
+                raise ValueError("profile-invalid")
+        resolved = [path.resolve() for path in declared_paths]
+        normalized = {os.path.normcase(str(value)) for value in resolved}
+        if len(normalized) != 1:
+            raise ValueError("profile-mismatch")
+        profile = resolved[0]
+    else:
+        resolver = known_folder or _windows_known_profile
+        profile = resolver().resolve()
+    if not profile.is_absolute() or profile.is_symlink():
+        raise ValueError("profile-invalid")
+    return profile
+
+
+def local_zotero_status(
+    config: Mapping[str, object] | None = None,
+) -> dict[str, bool | int]:
+    """Return value-free local Zotero readiness without API access."""
+    source = cast(
+        Mapping[str, object],
+        load_config() if config is None else config,
+    )
+    raw_zotero = source.get("zotero", {})
+    zotero: Mapping[str, object]
+    if isinstance(raw_zotero, dict):
+        zotero = cast(dict[str, object], raw_zotero)
+    else:
+        zotero = {}
+    raw_collections = zotero.get("collections", {})
+    collections: Mapping[str, object]
+    if isinstance(raw_collections, dict):
+        collections = cast(dict[str, object], raw_collections)
+    else:
+        collections = {}
+    raw_pdf_dir = zotero.get("pdf_dir", "")
+    pdf_dir = raw_pdf_dir.strip() if isinstance(raw_pdf_dir, str) else ""
+
+    def configured(value: object) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    return {
+        "api_key_configured": configured(zotero.get("api_key")),
+        "collection_count": sum(
+            1
+            for topic, value in collections.items()
+            if configured(topic) and configured(value)
+        ),
+        "email_configured": configured(
+            zotero.get("email", source.get("unpaywall_email"))
+        ),
+        "pdf_dir_configured": bool(pdf_dir),
+        "pdf_dir_exists": bool(
+            pdf_dir
+            and Path(pdf_dir).is_dir()
+            and not Path(pdf_dir).is_symlink()
+        ),
+        "user_id_configured": configured(zotero.get("user_id")),
+    }
 
 
 def get_runtime_policy(config: JsonObject | None = None) -> JsonObject:
