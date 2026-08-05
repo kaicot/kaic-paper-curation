@@ -107,6 +107,7 @@ def _probe_python(path: Path, mode: str) -> dict[str, object]:
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=30,
             env=environment,
         )
