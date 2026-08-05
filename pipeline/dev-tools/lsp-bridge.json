@@ -1,0 +1,1 @@
+{"engines":{"basedpyright":{"argv":["node","node_modules/basedpyright/index.js","--outputjson"]},"biome":{"argv":["node_modules/@biomejs/biome/bin/biome","check","--reporter=json"]}},"extensions":{".js":"biome",".py":"basedpyright"},"schema_version":1}
