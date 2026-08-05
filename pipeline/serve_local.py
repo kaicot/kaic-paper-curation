@@ -119,10 +119,9 @@ class LocalHandler(SimpleHTTPRequestHandler):
 
     @override
     def handle_expect_100(self) -> bool:
-        try:
-            self._preflight()
-        except LocalAnswerError as error:
-            self._send_error(error.status, error.code)
+        preflight = self._preflight()
+        if preflight is not None:
+            self._send_error(*preflight)
             return False
         self.send_response_only(100)
         self.end_headers()

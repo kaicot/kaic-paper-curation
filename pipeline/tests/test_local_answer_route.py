@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -392,41 +393,34 @@ class LocalAnswerRouteTests(unittest.TestCase):
             self.assertEqual(answer["schema"], RESPONSE_SCHEMA)
             self.assertNotIn("Access-Control-Allow-Origin", headers)
 
-            connection = http.client.HTTPConnection(
-                cast(str, host),
-                port,
+            with socket.create_connection(
+                (cast(str, host), port),
                 timeout=5,
+            ) as connection:
+                connection.sendall(
+                    "\r\n".join(
+                        (
+                            "POST /api/answer HTTP/1.1",
+                            f"Host: {host}:{port}",
+                            "Content-Type: application/json",
+                            (
+                                "Content-Length: "
+                                f"{MAX_BODY_BYTES + 1}"
+                            ),
+                            "Expect: 100-continue",
+                            "",
+                            "",
+                        )
+                    ).encode("ascii")
+                )
+                oversized_raw = connection.recv(4096)
+            self.assertTrue(
+                oversized_raw.startswith(
+                    b"HTTP/1.1 413 Request Entity Too Large"
+                ),
+                oversized_raw,
             )
-            try:
-                connection.putrequest("POST", "/api/answer")
-                connection.putheader(
-                    "Content-Type",
-                    "application/json",
-                )
-                connection.putheader(
-                    "Content-Length",
-                    str(MAX_BODY_BYTES + 1),
-                )
-                connection.putheader(
-                    "Expect",
-                    "100-continue",
-                )
-                connection.endheaders()
-                oversized_response = connection.getresponse()
-                oversized = cast(
-                    dict[str, object],
-                    cast(
-                        object,
-                        json.loads(oversized_response.read()),
-                    ),
-                )
-                self.assertEqual(oversized_response.status, 413)
-                self.assertEqual(
-                    oversized["status"],
-                    "body-too-large",
-                )
-            finally:
-                connection.close()
+            self.assertNotIn(b"100 Continue", oversized_raw)
 
             for denied in ("/api/embed", "/api/audio-email", "/api/citedby"):
                 status, _, _ = self._request(base, denied, body=b"{}")
