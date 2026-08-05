@@ -666,7 +666,25 @@ def main():
                         help="Zotero API 연결까지 테스트 (네트워크 필요)")
     parser.add_argument("--topic", default="",
                         help="해당 토픽의 산출물 존재 여부까지 점검 (예: humanoid)")
+    parser.add_argument("--codex-canary", action="store_true",
+                        help="저장된 ChatGPT 인증 Codex 경계만 검증")
     args = parser.parse_args()
+
+    if args.codex_canary:
+        sys.path.insert(0, str(REPO))
+        from pipeline.providers.codex_gateway import CodexGateway, CodexGatewayError
+        try:
+            result = CodexGateway.production(REPO).requalify(accept=False)
+        except CodexGatewayError as exc:
+            print(json.dumps({"code": exc.code, "status": "FAIL"}, sort_keys=True))
+            raise SystemExit(1) from None
+        print(json.dumps({
+            "canary_output_sha256": result["canary_output_sha256"],
+            "cli_version": result["cli_version"],
+            "roles": result["roles"],
+            "status": "PASS",
+        }, ensure_ascii=False, sort_keys=True))
+        raise SystemExit(0)
 
     print("=" * 52)
     print("  Paper Curation — Doctor (환경 진단)")
