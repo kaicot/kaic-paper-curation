@@ -12,11 +12,6 @@ from html import escape as esc
 from urllib.parse import quote as _urlquote
 
 from config_loader import PAPERS_DIR as _PAPERS_DIR
-from lib.audio_overview import (
-    get_audio_css as _audio_css_lib,
-    audio_modal_html as _audio_modal_lib,
-    audio_script_block as _audio_script_lib,
-)
 PAPERS = str(_PAPERS_DIR)
 
 # Zotero PDF attachment keys (slug → key). Written by build_topic_index;
@@ -28,25 +23,6 @@ try:
         _ZOTERO_KEYS = json.load(_f)
 except Exception:
     _ZOTERO_KEYS = {}
-
-# Gemini key for the browser-direct Audio Overview feature. Baked into the
-# review page at build time (like the Deep Research keys in build_topic_index),
-# then stripped from every deployed page by prepare_deploy.py. On Cloudflare the
-# value is "" so the generate button stays disabled (localhost-only feature).
-_GEMINI_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
-_LOCAL_EMAILS_RAW = os.environ.get("PAPER_CURATION_LOCAL_EMAILS", "")
-if not _GEMINI_KEY or not _LOCAL_EMAILS_RAW:
-    _cfg_path = os.path.join(os.path.dirname(os.path.dirname(_PAPERS_DIR)), "config.json")
-    try:
-        with open(_cfg_path, "r", encoding="utf-8") as _f:
-            _cfg = json.load(_f)
-        if not _GEMINI_KEY:
-            _GEMINI_KEY = _cfg.get("gemini_api_key") or _cfg.get("google_api_key", "")
-        if not _LOCAL_EMAILS_RAW:
-            _LOCAL_EMAILS_RAW = ",".join(_cfg.get("local_emails", []) or [])
-    except Exception:
-        pass
-_LOCAL_EMAILS = [e.strip() for e in _LOCAL_EMAILS_RAW.split(",") if e.strip()]
 
 THEMES = {
     "ai4s": {"accent": "#D63423", "accent_dark": "#A62018", "accent_bg": "#FEF0EF",
@@ -229,34 +205,23 @@ a {{ color: {t['link_color']}; }}
 
 
 # ---------------------------------------------------------------------------
-# Audio Overview (browser-direct podcast generation via Gemini). localhost-only.
+# Retired audio controls remain empty for template compatibility.
 # ---------------------------------------------------------------------------
 
 def get_audio_css(t):
-    return _audio_css_lib(t["accent"], t["accent_dark"], t["accent_bg"])
+    return ""
 
 
 def audio_bar_html():
-    """Button shown under the title. Always enabled — when the page is
-    deployed without a baked key, the modal JS prompts the visitor for
-    their own Gemini API key on first click and remembers it in
-    localStorage."""
-    return ('<div class="audio-bar">'
-            '<button class="audio-btn" id="audio-open" onclick="openAudioModal()">'
-            '\U0001F3A7 Audio Overview 생성</button></div>')
+    return ""
 
 
 def audio_modal_html():
-    return _audio_modal_lib(
-        "이 논문 리뷰를 팟캐스트형 오디오로 생성합니다. "
-        "(Gemini · 키는 브라우저에만 저장 · 완성본은 이메일로도 전송)"
-    )
+    return ""
 
 
 def audio_script_block(ctx):
-    """Wrap the shared Audio Overview JS with this paper's static context."""
-    return _audio_script_lib(_GEMINI_KEY, mode="paper", ctx=ctx,
-                              local_emails=_LOCAL_EMAILS)
+    return ""
 
 
 def parse_scores(md):
