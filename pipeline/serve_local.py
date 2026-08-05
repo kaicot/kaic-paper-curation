@@ -82,6 +82,8 @@ class LocalAnswerHTTPServer(ThreadingHTTPServer):
 
 
 class LocalHandler(SimpleHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     @property
     def local_server(self) -> LocalAnswerHTTPServer:
         return cast(LocalAnswerHTTPServer, self.server)
@@ -114,6 +116,17 @@ class LocalHandler(SimpleHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send_error(404, "not-found")
+
+    @override
+    def handle_expect_100(self) -> bool:
+        try:
+            self._preflight()
+        except LocalAnswerError as error:
+            self._send_error(error.status, error.code)
+            return False
+        self.send_response_only(100)
+        self.end_headers()
+        return True
 
     def do_POST(self) -> None:  # noqa: N802
         route = self.path.split("?", 1)[0]
