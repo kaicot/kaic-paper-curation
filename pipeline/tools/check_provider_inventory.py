@@ -19,7 +19,9 @@ import re
 import subprocess
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,7 +64,7 @@ def run_git(root: Path, *argv: str, binary: bool = False) -> bytes:
     return result.stdout if binary else result.stdout.replace(b"\r\n", b"\n")
 
 
-def verify_scanner(root: Path, lock_path: Path, attestation_path: Path) -> JsonObject:
+def verify_scanner(lock_path: Path, attestation_path: Path) -> JsonObject:
     """Verify all tool identities before parsing any JavaScript."""
     scanner = load_object(attestation_path)
     checks = {
@@ -491,7 +493,7 @@ sys.stdout.write(json.dumps(imported, separators=(",", ":")))
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise InventoryError(f"provider-poison import failed: {detail}")
-    value: JsonValue = json.loads(completed.stdout)
+    value = cast(JsonValue, json.loads(completed.stdout))
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise InventoryError("provider-poison import returned invalid evidence")
     return [item for item in value if isinstance(item, str)]
@@ -501,7 +503,7 @@ def _module_name(path: str) -> str:
     candidate = Path(path)
     parts = list(candidate.with_suffix("").parts)
     if parts[-1] == "__init__":
-        parts.pop()
+        _ = parts.pop()
     if not parts or not all(part.isidentifier() for part in parts):
         raise InventoryError(f"provider-poison import path is not a module: {path}")
     return ".".join(parts)
@@ -552,20 +554,53 @@ globalThis.addEventListener = () => {};
     return imported
 
 
+@dataclass(frozen=True)
+class Arguments:
+    patterns: Path
+    manifest: Path | None
+    scanner_lock: Path
+    scanner_attestation: Path | None
+    baseline: str
+    allow_owned_baseline_violations: bool
+    owners: str
+    require_owner_clean: int | None
+    require_zero_unresolved: bool
+    write_manifest: bool
+
+
+def parse_arguments() -> Arguments:
+    parser = argparse.ArgumentParser()
+    _ = parser.add_argument("--patterns", type=Path, required=True)
+    _ = parser.add_argument("--manifest", type=Path)
+    _ = parser.add_argument("--scanner-lock", type=Path, required=True)
+    _ = parser.add_argument("--scanner-attestation", type=Path)
+    _ = parser.add_argument("--baseline", required=True)
+    _ = parser.add_argument("--allow-owned-baseline-violations", action="store_true")
+    _ = parser.add_argument("--owners", default="9-15")
+    _ = parser.add_argument("--require-owner-clean", type=int)
+    _ = parser.add_argument("--require-zero-unresolved", action="store_true")
+    _ = parser.add_argument("--write-manifest", action="store_true")
+    namespace = parser.parse_args()
+    return Arguments(
+        patterns=cast(Path, namespace.patterns),
+        manifest=cast(Path | None, namespace.manifest),
+        scanner_lock=cast(Path, namespace.scanner_lock),
+        scanner_attestation=cast(Path | None, namespace.scanner_attestation),
+        baseline=cast(str, namespace.baseline),
+        allow_owned_baseline_violations=cast(
+            bool,
+            namespace.allow_owned_baseline_violations,
+        ),
+        owners=cast(str, namespace.owners),
+        require_owner_clean=cast(int | None, namespace.require_owner_clean),
+        require_zero_unresolved=cast(bool, namespace.require_zero_unresolved),
+        write_manifest=cast(bool, namespace.write_manifest),
+    )
+
+
 def main() -> int:
     """Verify or print a frozen manifest."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--patterns", type=Path, required=True)
-    parser.add_argument("--manifest", type=Path)
-    parser.add_argument("--scanner-lock", type=Path, required=True)
-    parser.add_argument("--scanner-attestation", type=Path)
-    parser.add_argument("--baseline", required=True)
-    parser.add_argument("--allow-owned-baseline-violations", action="store_true")
-    parser.add_argument("--owners", default="9-15")
-    parser.add_argument("--require-owner-clean", type=int)
-    parser.add_argument("--require-zero-unresolved", action="store_true")
-    parser.add_argument("--write-manifest", action="store_true")
-    args = parser.parse_args()
+    args = parse_arguments()
     root = Path.cwd().resolve()
     try:
         patterns_path = args.patterns.resolve()
@@ -576,7 +611,7 @@ def main() -> int:
             else root / ".omo/runtime/provider-scanner-resolved.json"
         )
         patterns = load_object(patterns_path)
-        scanner = verify_scanner(root, lock_path, attestation_path)
+        scanner = verify_scanner(lock_path, attestation_path)
         selected_modes = sum(
             (
                 bool(args.allow_owned_baseline_violations),
@@ -595,7 +630,7 @@ def main() -> int:
         baseline_rows = scan_baseline(root, args.baseline, patterns, scanner)
         expected_manifest = generated_manifest(args.baseline, patterns_path, lock_path, baseline_rows)
         if args.write_manifest:
-            sys.stdout.buffer.write(canonical(expected_manifest))
+            _ = sys.stdout.buffer.write(canonical(expected_manifest))
             return 0
         if args.manifest is None:
             raise InventoryError("--manifest is required outside --write-manifest")
@@ -693,7 +728,7 @@ def main() -> int:
             "poison_imported": len(poison_imported),
             "quarantine_findings": quarantine_findings,
         }
-        sys.stdout.buffer.write(canonical(summary))
+        _ = sys.stdout.buffer.write(canonical(summary))
     except (OSError, KeyError, ValueError, json.JSONDecodeError, InventoryError) as error:
         print(f"Provider inventory denied: {error}", file=sys.stderr)
         return 2

@@ -11,12 +11,14 @@ import sys
 import unittest
 from pathlib import Path
 from types import MappingProxyType
+from typing import cast
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from pipeline.provider_inventory import InventoryError, JsonObject, load_object
 from pipeline.runtime_policy import RuntimePolicyError, resolve_runtime_policy
 from pipeline.tools import check_provider_inventory as boundary
 
@@ -58,7 +60,7 @@ class ProviderBoundaryTests(unittest.TestCase):
             resolve_runtime_policy({"schema_version": 2, "runtime": {"llm_mode": "off"}}).mode,
             "off",
         )
-        forbidden = [
+        forbidden: list[tuple[JsonObject, str | None, bool]] = [
             ({"schema_version": 2, "runtime": {"llm_mode": "api"}}, None, False),
             ({"schema_version": 2, "runtime": {"llm_mode": True}}, None, False),
             ({"schema_version": 2, "allow_paid_api": True}, None, False),
@@ -103,7 +105,7 @@ class ProviderBoundaryTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
 
     def test_fingerprint_detects_duplicate_existing_shape(self) -> None:
-        patterns = boundary.load_object(ROOT / "pipeline/provider-scan-patterns-v1.json")
+        patterns = load_object(ROOT / "pipeline/provider-scan-patterns-v1.json")
         constructor = "Anth" + "ropic"
         one = f"client = {constructor}()\n".encode()
         two = f"client = {constructor}()\nother = {constructor}()\n".encode()
@@ -114,16 +116,18 @@ class ProviderBoundaryTests(unittest.TestCase):
 
     def test_paid_compat_is_metadata_only_and_poison_import_clean(self) -> None:
         module = importlib.import_module("pipeline.providers.paid_compat")
-        self.assertEqual(module.__all__, ("PAID_PROVIDER_QUARANTINE",))
-        quarantine = module.PAID_PROVIDER_QUARANTINE
+        exported = cast(tuple[str, ...], getattr(module, "__all__"))
+        self.assertEqual(exported, ("PAID_PROVIDER_QUARANTINE",))
+        quarantine = cast(object, getattr(module, "PAID_PROVIDER_QUARANTINE"))
         self.assertIsInstance(quarantine, MappingProxyType)
         self.assertFalse(callable(quarantine))
-        for public_name, value in vars(module).items():
+        namespace = cast(dict[str, object], vars(module))
+        for public_name, value in namespace.items():
             if not public_name.startswith("_") and public_name != "annotations":
                 self.assertFalse(callable(value), public_name)
         for forbidden in ("Anth" + "ropic", "Open" + "AI", "Generative" + "Model"):
             with self.assertRaises(AttributeError):
-                _ = getattr(module, forbidden)
+                _ = cast(object, getattr(module, forbidden))
         imported = boundary.poison_import_modules(
             ROOT,
             ("pipeline.providers.paid_compat",),
@@ -137,7 +141,7 @@ class ProviderBoundaryTests(unittest.TestCase):
             "9-15",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        summary = json.loads(result.stdout)
+        summary = cast(JsonObject, json.loads(result.stdout))
         self.assertEqual(summary["result"], "PASS")
         self.assertEqual(summary["unowned"], 0)
         self.assertEqual(
@@ -148,12 +152,16 @@ class ProviderBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["quarantine_findings"], 1)
 
     def test_owner_clean_selection_covers_every_manifest_path(self) -> None:
-        manifest = boundary.load_object(ROOT / "pipeline/provider-entrypoints.json")
+        manifest = load_object(ROOT / "pipeline/provider-entrypoints.json")
+        entrypoints = manifest.get("entrypoints")
+        self.assertIsInstance(entrypoints, list)
+        assert isinstance(entrypoints, list)
         for owner in range(9, 16):
             expected = sorted(
-                row["path"]
-                for row in manifest["entrypoints"]
+                path
+                for row in entrypoints
                 if isinstance(row, dict) and row.get("owner_todo") == owner
+                if isinstance(path := row.get("path"), str)
             )
             self.assertEqual(boundary.paths_for_owner(manifest, owner), expected)
 
@@ -187,7 +195,7 @@ class ProviderBoundaryTests(unittest.TestCase):
             "def public_factory():\n    return object()\n",
         ]
         for source in bad_sources:
-            with self.subTest(source=source), self.assertRaises(boundary.InventoryError):
+            with self.subTest(source=source), self.assertRaises(InventoryError):
                 boundary.validate_quarantine_source(source.encode("utf-8"))
         valid = (
             "from types import MappingProxyType\n"
