@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "auth_status": {"const": "Logged in using ChatGPT", "type": "string"},
+    "authenticode_status": {"const": "Valid", "type": "string"},
+    "binary_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "canary_output_sha256": {"additionalProperties": {"pattern": "^[0-9a-f]{64}$", "type": "string"}, "type": "object"},
+    "cli_version": {"const": "0.146.0", "type": "string"},
+    "contract_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "executable": {"type": "string"},
+    "final_executable": {"type": "string"},
+    "policy_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "roles": {"type": "object"},
+    "schema": {"const": "codex-cli-attestation-v1", "type": "string"},
+    "schema_version": {"const": 1, "type": "integer"},
+    "signer": {"type": "string"}
+  },
+  "required": ["auth_status", "authenticode_status", "binary_sha256", "canary_output_sha256", "cli_version", "contract_sha256", "executable", "final_executable", "policy_sha256", "roles", "schema", "schema_version", "signer"],
+  "type": "object"
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attested": {"type": "boolean"},
+    "cli_version": {"type": "string"},
+    "contract_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "paid_api": {"const": false, "type": "boolean"},
+    "policy_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "provider": {"const": "saved-chatgpt-auth-codex-cli", "type": "string"},
+    "roles": {"type": "object"},
+    "schema": {"const": "codex-capabilities-v1", "type": "string"},
+    "schema_version": {"const": 1, "type": "integer"}
+  },
+  "required": ["attested", "cli_version", "contract_sha256", "paid_api", "policy_sha256", "provider", "roles", "schema", "schema_version"],
+  "type": "object"
+}
