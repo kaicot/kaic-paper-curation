@@ -1,28 +1,30 @@
-"""Unavailable secondary capability boundary: build-search-index."""
+"""Build and transactionally activate the local sparse-index-v2 artifact."""
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Never
+from typing import cast
 
-_ROOT = next(
-    parent
-    for parent in Path(__file__).resolve().parents
-    if (parent / "pipeline").is_dir()
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.sparse_index import (  # noqa: E402
+    SparseIndexError,
+    build_sparse_index,
+    purge_transaction,
+    recover_transaction,
+    restore_transaction,
 )
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
 
-from pipeline.secondary_capability_guard import (  # noqa: E402
-    CAPABILITY_STATUS as SECONDARY_CAPABILITY_STATUS,
-    cli as _capability_cli,
-    deny as _deny,
-)
 
-CAPABILITY_NAME = "build-search-index"
-DOCS_DIR = _ROOT / "docs"
+DOCS_DIR = ROOT / "docs"
 PAPERS_DIR = DOCS_DIR / "papers"
 
 
@@ -33,6 +35,7 @@ def source_fingerprint(
     docs_dir: Path | None = None,
     papers_dir: Path | None = None,
 ) -> tuple[str, int]:
+    """Compatibility fingerprint for a retired index during migration."""
     docs_root = Path(docs_dir) if docs_dir is not None else DOCS_DIR
     papers_root = Path(papers_dir) if papers_dir is not None else PAPERS_DIR
     files: list[tuple[str, Path]] = []
@@ -58,19 +61,103 @@ def source_fingerprint(
     return digest.hexdigest(), len(files)
 
 
-def _unavailable(*_args: object, **_kwargs: object) -> Never:
-    _ = (_args, _kwargs)
-    return _deny(CAPABILITY_NAME)
+@dataclass(frozen=True, slots=True)
+class Arguments:
+    action: str
+    confirmation: str | None
+    docs_dir: Path
+    manifest: Path | None
+    manifest_sha256: str | None
+    mode: str
+    topic: str | None
 
 
-def __getattr__(name: str):
-    if name.startswith("__"):
-        raise AttributeError(name)
-    return _unavailable
+def parse_arguments(argv: list[str] | None = None) -> Arguments:
+    parser = argparse.ArgumentParser()
+    _ = parser.add_argument("--topic")
+    _ = parser.add_argument("--docs-dir", type=Path, default=DOCS_DIR)
+    _ = parser.add_argument("--mode", choices=("bm25",), default="bm25")
+    actions = parser.add_mutually_exclusive_group()
+    _ = actions.add_argument("--recover", action="store_true")
+    _ = actions.add_argument("--restore", action="store_true")
+    _ = actions.add_argument("--purge", action="store_true")
+    _ = parser.add_argument("--manifest", type=Path)
+    _ = parser.add_argument("--manifest-sha256")
+    _ = parser.add_argument("--confirm-purge")
+    namespace = parser.parse_args(argv)
+    action = (
+        "recover"
+        if cast(bool, namespace.recover)
+        else "restore"
+        if cast(bool, namespace.restore)
+        else "purge"
+        if cast(bool, namespace.purge)
+        else "build"
+    )
+    return Arguments(
+        action=action,
+        confirmation=cast(str | None, namespace.confirm_purge),
+        docs_dir=cast(Path, namespace.docs_dir).resolve(),
+        manifest=cast(Path | None, namespace.manifest),
+        manifest_sha256=cast(str | None, namespace.manifest_sha256),
+        mode=cast(str, namespace.mode),
+        topic=cast(str | None, namespace.topic),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
-    return _capability_cli(CAPABILITY_NAME, argv)
+    arguments = parse_arguments(argv)
+    try:
+        if arguments.action == "build":
+            if arguments.topic is None:
+                raise SparseIndexError("topic-required")
+            result = build_sparse_index(
+                arguments.topic,
+                arguments.docs_dir,
+            )
+        else:
+            if arguments.manifest is None:
+                raise SparseIndexError("manifest-required")
+            manifest = arguments.manifest.resolve()
+            if arguments.action == "recover":
+                result = recover_transaction(
+                    manifest,
+                    arguments.docs_dir,
+                )
+            elif arguments.action == "restore":
+                result = restore_transaction(
+                    manifest,
+                    arguments.docs_dir,
+                )
+            else:
+                result = purge_transaction(
+                    manifest,
+                    arguments.docs_dir,
+                    confirmation=arguments.confirmation,
+                    manifest_sha256=arguments.manifest_sha256,
+                )
+    except SparseIndexError as error:
+        print(f"Sparse index denied: {error}", file=sys.stderr)
+        return 2
+    print(
+        json.dumps(
+            {
+                "active_path": str(result.active_path),
+                "manifest_path": (
+                    str(result.manifest_path)
+                    if result.manifest_path is not None
+                    else None
+                ),
+                "phase": result.phase,
+                "reused": result.reused,
+                "status": "ok",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0
 
 
 if __name__ == "__main__":

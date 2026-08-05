@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -185,7 +184,7 @@ def default_stage_plan(
                 "--mode",
                 "bm25",
             ),
-            (f"{topic_root}/_search_index.bm25-v2.json",),
+            (f"{topic_root}/_search_index.json",),
             ("bm25",),
         ),
         Stage(
@@ -220,72 +219,13 @@ def build_transitional_sparse_index(
     topic: str,
     workspace_root: Path,
 ) -> Path:
-    """Build a deterministic provider-free sparse v2 sidecar.
+    """Build and activate the deterministic sparse v2 index."""
+    from pipeline.sparse_index import build_sparse_index
 
-    Todo 16 owns activation/quarantine of the legacy active index. This bridge
-    deliberately writes a sidecar and never replaces that legacy artifact.
-    """
-    source = workspace_root / "docs" / "papers" / "_papers_index.json"
-    raw = cast(object, json.loads(source.read_text(encoding="utf-8")))
-    if not isinstance(raw, list):
-        raise RuntimeError("paper index must be a list")
-    documents: list[dict[str, object]] = []
-    postings: dict[str, list[list[int]]] = {}
-    for item in cast(list[object], raw):
-        if not isinstance(item, dict):
-            continue
-        paper = cast(dict[str, object], item)
-        topics = paper.get("topics", [])
-        if not isinstance(topics, list) or topic not in topics:
-            continue
-        slug = str(paper.get("slug", "")).strip()
-        if not slug:
-            continue
-        text = " ".join(
-            str(paper.get(field, ""))
-            for field in ("title", "essence", "abstract")
-        ).lower()
-        terms = cast(
-            list[str],
-            re.findall(r"[0-9a-z가-힣]{2,}", text),
-        )
-        frequencies: dict[str, int] = {}
-        for term in terms:
-            frequencies[term] = frequencies.get(term, 0) + 1
-        document_id = len(documents)
-        documents.append(
-            {
-                "length": len(terms),
-                "slug": slug,
-                "title": str(paper.get("title", "")),
-            }
-        )
-        for term in sorted(frequencies):
-            postings.setdefault(term, []).append(
-                [document_id, frequencies[term]]
-            )
-    total_length = sum(
-        cast(int, document["length"])
-        for document in documents
-    )
-    payload: dict[str, object] = {
-        "average_document_length": (
-            total_length / len(documents) if documents else 0.0
-        ),
-        "documents": documents,
-        "postings": {term: postings[term] for term in sorted(postings)},
-        "schema": "paper-curation-sparse-index-v2",
-        "schema_version": 2,
-        "topic": topic,
-    }
-    output = (
-        workspace_root
-        / "docs"
-        / topic
-        / "_search_index.bm25-v2.json"
-    )
-    _atomic_write_json(output, payload)
-    return output
+    return build_sparse_index(
+        topic,
+        workspace_root / "docs",
+    ).active_path
 
 
 def _is_sparse_v2(path: Path) -> bool:
