@@ -407,6 +407,10 @@ class LocalAnswerRouteTests(unittest.TestCase):
                     "Content-Length",
                     str(MAX_BODY_BYTES + 1),
                 )
+                connection.putheader(
+                    "Expect",
+                    "100-continue",
+                )
                 connection.endheaders()
                 oversized_response = connection.getresponse()
                 oversized = cast(
