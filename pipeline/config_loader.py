@@ -14,10 +14,7 @@ import ssl
 import urllib.request
 from pathlib import Path
 
-# Corporate proxy intercepts HTTPS with self-signed cert; skip verification
 _ssl_ctx = ssl.create_default_context()
-_ssl_ctx.check_hostname = False
-_ssl_ctx.verify_mode = ssl.CERT_NONE
 
 PIPELINE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PIPELINE_DIR.parent
