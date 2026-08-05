@@ -68,7 +68,7 @@ class CrossIndexFingerprintTests(unittest.TestCase):
                 first_fingerprint,
                 second["source_fingerprint"],
             )
-            self.assertFalse((root / "_cross" / cross.EMB_BIN).exists())
+            self.assertEqual(list((root / "_cross").glob("*.bin")), [])
 
     def test_merge_rejects_non_sparse_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -131,6 +131,64 @@ class CrossIndexFingerprintTests(unittest.TestCase):
                     ),
                 )
             self.assertFalse((root / "_cross").exists())
+
+    def test_cross_rejects_corrupt_child_and_self_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._source(root, "alpha", "agent graph")
+            active = root / "alpha" / cross.SEARCH_INDEX
+            value = cast(
+                dict[str, object],
+                cast(object, json.loads(active.read_text(encoding="utf-8"))),
+            )
+            documents = cast(list[dict[str, object]], value["documents"])
+            documents[0]["length"] = 99
+            _ = active.write_text(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(SparseIndexError):
+                _ = build_cross_sparse_index(["alpha"], root)
+            self.assertFalse((root / "_cross").exists())
+
+            self._source(root, "alpha", "agent graph")
+            _ = build_cross_sparse_index(["alpha"], root)
+            with self.assertRaisesRegex(
+                SparseIndexError,
+                "cross-self-source-refused",
+            ):
+                _ = build_cross_sparse_index(["_cross"], root)
+
+    def test_cross_cli_refreshes_installed_evaluation_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "docs"
+            self._source(root, "alpha", "agent graph")
+            with patch.object(
+                cross,
+                "refresh_evaluation_snapshot",
+                return_value=0,
+            ) as refresh:
+                exit_code = cross.main(
+                    [
+                        "--docs-dir",
+                        str(root),
+                        "alpha",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            refresh.assert_called_once_with(
+                [
+                    "--project-root",
+                    str(root.resolve().parent),
+                    "--if-installed",
+                ]
+            )
 
 
 if __name__ == "__main__":

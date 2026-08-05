@@ -8,16 +8,18 @@ import hashlib
 import json
 import math
 import os
+import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, cast
 
-try:  # Script execution from pipeline/ and package imports are both supported.
-    from query_search_index import query_search_index
-except ImportError:
-    from pipeline.query_search_index import query_search_index
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-SCHEMA_VERSION = 1
+from pipeline.query_search_index import query_search_index  # noqa: E402
+
+SCHEMA_VERSION = 2
 MAX_K = 10
 FAILURE_K = 5
 
@@ -45,11 +47,13 @@ def _read_json(path: str | Path, label: str) -> Any:
 
 
 def load_query_set(path: str | Path) -> tuple[list[dict[str, Any]], str]:
-    """Load and validate JSONL queries, returning rows and their byte hash."""
+    """Load JSONL queries and hash normalized UTF-8 line endings."""
     query_path = Path(path)
     try:
-        lines = query_path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+        text = query_path.read_text(encoding="utf-8")
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = normalized.splitlines()
+    except (OSError, UnicodeError) as exc:
         raise EvaluationError(f"cannot read query set: {path}: {exc}") from exc
     rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -88,54 +92,7 @@ def load_query_set(path: str | Path) -> tuple[list[dict[str, Any]], str]:
         rows.append(row)
     if not rows:
         raise EvaluationError("query set must contain at least one row")
-    return rows, sha256_file(query_path)
-
-
-def load_vector_manifest(path: str | Path, rows: Sequence[Mapping[str, Any]], query_set_sha256: str
-                         ) -> dict[str, Any]:
-    """Load a fixed-vector manifest and validate it against query rows."""
-    manifest = _read_json(path, "vector manifest")
-    if not isinstance(manifest, dict):
-        raise EvaluationError("vector manifest must be an object")
-    required = {"schema_version", "model", "dim", "query_set_sha256", "vectors"}
-    missing = required - manifest.keys()
-    if missing:
-        raise EvaluationError(f"vector manifest missing fields: {', '.join(sorted(missing))}")
-    if manifest["schema_version"] != SCHEMA_VERSION:
-        raise EvaluationError(f"unsupported vector manifest schema_version: {manifest['schema_version']!r}")
-    if not isinstance(manifest["model"], str) or not manifest["model"].strip():
-        raise EvaluationError("vector manifest model must be a non-empty string")
-    dim = manifest["dim"]
-    if not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0:
-        raise EvaluationError("vector manifest dim must be a positive integer")
-    if manifest["query_set_sha256"] != query_set_sha256:
-        raise EvaluationError("vector manifest query_set_sha256 does not match query set")
-    vectors = manifest["vectors"]
-    if not isinstance(vectors, dict):
-        raise EvaluationError("vector manifest vectors must be an object")
-    ids = {str(row["id"]) for row in rows}
-    if set(vectors) != ids:
-        missing_ids, extra_ids = ids - set(vectors), set(vectors) - ids
-        details = []
-        if missing_ids:
-            details.append("missing IDs: " + ", ".join(sorted(missing_ids)))
-        if extra_ids:
-            details.append("unknown IDs: " + ", ".join(sorted(extra_ids)))
-        raise EvaluationError("vector manifest ID coverage mismatch (" + "; ".join(details) + ")")
-    normalized: dict[str, list[float]] = {}
-    for query_id, raw_vector in vectors.items():
-        if not isinstance(raw_vector, list) or len(raw_vector) != dim:
-            raise EvaluationError(f"vector for {query_id!r} must have dimension {dim}")
-        try:
-            vector = [float(value) for value in raw_vector]
-        except (TypeError, ValueError) as exc:
-            raise EvaluationError(f"vector for {query_id!r} must contain numbers") from exc
-        if not all(math.isfinite(value) for value in vector):
-            raise EvaluationError(f"vector for {query_id!r} must contain finite numbers")
-        if not any(value != 0 for value in vector):
-            raise EvaluationError(f"vector for {query_id!r} must not be all zeros")
-        normalized[query_id] = vector
-    return {**manifest, "vectors": normalized}
+    return rows, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def collection_paper_slugs(collection: str, docs_dir: str | Path | None) -> set[str]:
@@ -143,9 +100,16 @@ def collection_paper_slugs(collection: str, docs_dir: str | Path | None) -> set[
     root = Path(docs_dir) if docs_dir is not None else Path(__file__).resolve().parent.parent / "docs"
     index_path = root / collection / "_search_index.json"
     index = _read_json(index_path, "search index")
-    if not isinstance(index, dict) or not isinstance(index.get("papers"), dict):
-        raise EvaluationError(f"invalid search index papers metadata: {index_path}")
-    return set(index["papers"])
+    if not isinstance(index, dict) or not isinstance(index.get("documents"), list):
+        raise EvaluationError(f"invalid sparse index document metadata: {index_path}")
+    slugs: list[str] = []
+    for item in index["documents"]:
+        if not isinstance(item, dict) or not isinstance(item.get("slug"), str):
+            raise EvaluationError(f"invalid sparse index document row: {index_path}")
+        slugs.append(str(item["slug"]))
+    if len(slugs) != len(set(slugs)) or slugs != sorted(slugs):
+        raise EvaluationError(f"invalid sparse index slug ordering: {index_path}")
+    return set(slugs)
 
 
 def validate_relevant_slugs(rows: Iterable[Mapping[str, Any]], docs_dir: str | Path | None) -> dict[str, set[str]]:
@@ -156,7 +120,10 @@ def validate_relevant_slugs(rows: Iterable[Mapping[str, Any]], docs_dir: str | P
         collection = str(row["collection"])
         if collection not in available:
             available[collection] = collection_paper_slugs(collection, docs_dir)
-        missing = sorted(set(row["relevant_slugs"]) - available[collection])
+        missing = sorted(
+            set(cast(Sequence[str], row["relevant_slugs"]))
+            - available[collection]
+        )
         if missing:
             absent.append(f"{row['id']} ({collection}): {', '.join(missing)}")
     if absent:
@@ -164,22 +131,39 @@ def validate_relevant_slugs(rows: Iterable[Mapping[str, Any]], docs_dir: str | P
     return available
 
 
-def evaluate_rows(rows: Sequence[Mapping[str, Any]], vectors: Mapping[str, Sequence[float]], *,
-                  docs_dir: str | Path | None = None, max_k: int = MAX_K) -> list[dict[str, Any]]:
-    """Run each query using supplied vectors only; no embedding/network path is used."""
+def evaluate_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    docs_dir: str | Path | None = None,
+    max_k: int = MAX_K,
+) -> list[dict[str, Any]]:
+    """Run each query through the local BM25-only contract."""
     if max_k < MAX_K:
         raise EvaluationError(f"max_k must be at least {MAX_K}")
     evaluations: list[dict[str, Any]] = []
     for row in rows:
-        result = query_search_index(str(row["collection"]), str(row["query"]), mode="hybrid",
-                                    query_vector=vectors[str(row["id"])], top_k=max_k,
-                                    docs_dir=docs_dir)
-        top_slugs = [str(item.get("slug", "")) for item in result.get("results", [])]
+        result = query_search_index(
+            str(row["collection"]),
+            str(row["query"]),
+            top_k=max_k,
+            docs_dir=docs_dir,
+        )
+        if result.get("status") != "ok":
+            raise EvaluationError(
+                f"query {row['id']} failed: "
+                f"{result.get('status')}:{result.get('code', '')}"
+            )
+        result_rows = cast(
+            list[dict[str, object]],
+            result.get("results", []),
+        )
+        top_slugs = [str(item.get("slug", "")) for item in result_rows]
         ranks: dict[str, int | None] = {}
-        for slug in row["relevant_slugs"]:
+        relevant_slugs = cast(Sequence[str], row["relevant_slugs"])
+        for slug in relevant_slugs:
             ranks[slug] = next((rank for rank, actual in enumerate(top_slugs, 1) if actual == slug), None)
         evaluations.append({"id": row["id"], "query": row["query"], "collection": row["collection"],
-                            "relevant_slugs": list(row["relevant_slugs"]), "ranks": ranks,
+                            "relevant_slugs": list(relevant_slugs), "ranks": ranks,
                             "top_slugs": top_slugs[:max_k]})
     return evaluations
 
@@ -209,7 +193,7 @@ def compute_metrics(evaluations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def build_report(evaluations: Sequence[Mapping[str, Any]], metrics: Mapping[str, Any], *,
-                 query_set_sha256: str, vector_manifest_sha256: str) -> dict[str, Any]:
+                 query_set_sha256: str) -> dict[str, Any]:
     failures = [{"id": item["id"], "collection": item["collection"],
                  "expected_slugs": item["relevant_slugs"], "actual_top_slugs": item["top_slugs"],
                  "ranks": item["ranks"]}
@@ -217,7 +201,7 @@ def build_report(evaluations: Sequence[Mapping[str, Any]], metrics: Mapping[str,
                 if any(rank is None or rank > FAILURE_K for rank in item["ranks"].values())]
     return {"schema_version": SCHEMA_VERSION,
             "timestamp": _datetime.datetime.now(_datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-            "query_set_sha256": query_set_sha256, "vector_manifest_sha256": vector_manifest_sha256,
+            "query_set_sha256": query_set_sha256, "retrieval_mode": "bm25",
             "collections": metrics["collections"], "aggregate": metrics["aggregate"],
             "queries": list(evaluations), "failures": failures}
 
@@ -249,21 +233,27 @@ def write_report(path: str | Path, report: Mapping[str, Any]) -> None:
 def write_baseline(path: str | Path, report: Mapping[str, Any]) -> None:
     """Write only comparable metrics and input identities, never query detail."""
     baseline = {"schema_version": SCHEMA_VERSION, "query_set_sha256": report["query_set_sha256"],
-                "vector_manifest_sha256": report["vector_manifest_sha256"],
+                "retrieval_mode": "bm25",
                 "collections": report["collections"], "aggregate": report["aggregate"]}
     write_json_atomic(path, baseline)
 
 
 def load_baseline(path: str | Path) -> dict[str, Any]:
     baseline = _read_json(path, "baseline")
+    if isinstance(baseline, dict) and baseline.get("status") == "record-required":
+        raise EvaluationError(
+            "BM25 baseline must be recorded with --record-baseline"
+        )
     if not isinstance(baseline, dict) or not isinstance(baseline.get("collections"), dict):
         raise EvaluationError("baseline must contain collection metrics")
     return baseline
 
 
 def validate_baseline_identity(baseline: Mapping[str, Any], report: Mapping[str, Any]) -> None:
-    """Reject comparisons across different query sets or fixed-vector manifests."""
-    for field in ("query_set_sha256", "vector_manifest_sha256"):
+    """Reject comparisons across different query sets or retrieval modes."""
+    if baseline.get("schema_version") != SCHEMA_VERSION:
+        raise EvaluationError("baseline schema_version does not match current evaluation")
+    for field in ("query_set_sha256", "retrieval_mode"):
         if baseline.get(field) != report.get(field):
             raise EvaluationError(f"baseline {field} does not match current evaluation")
 
@@ -299,9 +289,8 @@ def strict_failures(report: Mapping[str, Any], baseline: Mapping[str, Any] | Non
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate local search-index retrieval with fixed vectors")
+    parser = argparse.ArgumentParser(description="Evaluate local sparse-index-v2 BM25 retrieval")
     parser.add_argument("--queries", required=True, help="JSONL query set")
-    parser.add_argument("--vectors", required=True, help="fixed-vector JSON manifest")
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--topic", help="evaluate rows for this collection")
     selection.add_argument("--all", action="store_true", help="evaluate all query rows")
@@ -331,26 +320,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--record-baseline requires --all; topic baselines may not replace the shared baseline"
             )
         all_rows, query_hash = load_query_set(args.queries)
-        manifest = load_vector_manifest(args.vectors, all_rows, query_hash)
         rows = all_rows
         if args.topic:
             rows = [row for row in all_rows if row["collection"] == args.topic]
             if not rows:
                 raise EvaluationError(f"no query rows for topic: {args.topic}")
-        # Manifest hashes the complete source file; evaluation can use a selected subset.
-        selected_vectors = {row["id"]: manifest["vectors"][row["id"]] for row in rows}
-        missing_metadata: list[str] = []
-        available: dict[str, set[str]] = {}
-        for row in rows:
-            collection = row["collection"]
-            available.setdefault(collection, collection_paper_slugs(collection, args.docs_dir))
-            missing = sorted(set(row["relevant_slugs"]) - available[collection])
-            if missing:
-                missing_metadata.append(f"{row['id']} ({collection}): {', '.join(missing)}")
-        evaluations = evaluate_rows(rows, selected_vectors, docs_dir=args.docs_dir)
+        _ = validate_relevant_slugs(rows, args.docs_dir)
+        evaluations = evaluate_rows(rows, docs_dir=args.docs_dir)
         metrics = compute_metrics(evaluations)
-        report = build_report(evaluations, metrics, query_set_sha256=query_hash,
-                              vector_manifest_sha256=sha256_file(args.vectors))
+        report = build_report(
+            evaluations,
+            metrics,
+            query_set_sha256=query_hash,
+        )
         write_report(args.output, report)
         aggregate = report["aggregate"]
         print(
@@ -371,8 +353,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             validate_baseline_metrics(baseline, report)
         problems = strict_failures(report, baseline, min_recall_at_5=args.min_recall_at_5,
                                    max_regression=args.max_regression)
-        problems.extend("expected slug absent from collection metadata: " + item
-                        for item in missing_metadata)
         if args.strict and problems:
             for problem in problems:
                 print(f"quality gate failed: {problem}")

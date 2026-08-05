@@ -36,6 +36,20 @@ LEGACY_ORDER: Final = (
     "_search_index.bm25-v2.json",
 )
 ACTIVE_NAME: Final = "_search_index.json"
+BM25_CONTRACT: Final = {
+    "b": 0.75,
+    "idf": "ln(1+(N-df+0.5)/(df+0.5))",
+    "k1": 1.5,
+    "query_term_frequency": False,
+    "tie_break": "document_id-ascending",
+}
+TOKENIZER_CONTRACT: Final = {
+    "ascii_pattern": "[a-z0-9]+",
+    "hangul_pattern": "[\\uAC00-\\uD7AF\\u1100-\\u11FF\\u3130-\\u318F]+",
+    "id": "ascii-alnum-hangul-bigram-v1",
+    "lowercase": "unicode-lower",
+    "unicode_normalization": "NFC",
+}
 TERMINAL_PHASES: Final = frozenset(
     {"committed", "rolled_back", "restored", "purged"}
 )
@@ -405,6 +419,162 @@ def tokenize(value: str) -> list[str]:
     return tokens
 
 
+def validate_sparse_index_payload(
+    value: dict[str, object],
+    topic: str,
+) -> tuple[list[dict[str, object]], dict[str, list[list[int]]]]:
+    """Validate the complete machine-consumed sparse v2 structure."""
+    cross = topic == "_cross"
+    required_root: set[str] = {
+        "average_document_length",
+        "bm25",
+        "document_count",
+        "documents",
+        "postings",
+        "schema",
+        "schema_version",
+        "source",
+        "source_file_count",
+        "source_fingerprint",
+        "tokenizer",
+        "topic",
+        "total_document_length",
+    } | ({"topics"} if cross else set())
+    if set(value) != required_root:
+        raise SparseIndexError("sparse-root-fields-invalid")
+    if (
+        value.get("schema") != SPARSE_SCHEMA
+        or value.get("schema_version") != 2
+        or value.get("topic") != topic
+        or value.get("bm25") != BM25_CONTRACT
+        or value.get("tokenizer") != TOKENIZER_CONTRACT
+    ):
+        raise SparseIndexError("sparse-contract-invalid")
+    raw_documents = value.get("documents")
+    raw_postings = value.get("postings")
+    if not isinstance(raw_documents, list) or not isinstance(raw_postings, dict):
+        raise SparseIndexError("sparse-containers-invalid")
+    hash_pattern = re.compile(r"[0-9a-f]{64}")
+    documents: list[dict[str, object]] = []
+    prior_slug = ""
+    for document_id, raw_document in enumerate(cast(list[object], raw_documents)):
+        if not isinstance(raw_document, dict):
+            raise SparseIndexError("sparse-document-invalid")
+        document = cast(dict[str, object], raw_document)
+        required_document: set[str] = {
+            "content_sha256",
+            "id",
+            "length",
+            "slug",
+            "source_sha256",
+            "title",
+        } | ({"topics"} if cross else set())
+        if set(document) != required_document:
+            raise SparseIndexError("sparse-document-fields-invalid")
+        slug = document.get("slug")
+        length = document.get("length")
+        content_sha = document.get("content_sha256")
+        source_sha = document.get("source_sha256")
+        if (
+            document.get("id") != document_id
+            or not isinstance(slug, str)
+            or not slug
+            or slug <= prior_slug
+            or not isinstance(document.get("title"), str)
+            or not isinstance(length, int)
+            or isinstance(length, bool)
+            or length < 0
+            or not isinstance(content_sha, str)
+            or hash_pattern.fullmatch(content_sha) is None
+            or not isinstance(source_sha, str)
+            or hash_pattern.fullmatch(source_sha) is None
+        ):
+            raise SparseIndexError("sparse-document-metadata-invalid")
+        if cross:
+            topics = document.get("topics")
+            topic_items = (
+                cast(list[object], topics)
+                if isinstance(topics, list)
+                else []
+            )
+            if (
+                not isinstance(topics, list)
+                or not topics
+                or not all(
+                    isinstance(item, str) and item and item != "_cross"
+                    for item in topic_items
+                )
+            ):
+                raise SparseIndexError("sparse-cross-topics-invalid")
+            normalized_topics = cast(list[str], topic_items)
+            if normalized_topics != sorted(set(normalized_topics)):
+                raise SparseIndexError("sparse-cross-topics-invalid")
+        prior_slug = slug
+        documents.append(document)
+    if value.get("document_count") != len(documents):
+        raise SparseIndexError("sparse-document-count-mismatch")
+    total_length = sum(cast(int, item["length"]) for item in documents)
+    if value.get("total_document_length") != total_length:
+        raise SparseIndexError("sparse-total-length-mismatch")
+    average = value.get("average_document_length")
+    expected_average = total_length / len(documents) if documents else 0.0
+    if (
+        not isinstance(average, (int, float))
+        or isinstance(average, bool)
+        or float(average) != expected_average
+    ):
+        raise SparseIndexError("sparse-average-length-mismatch")
+    terms = list(cast(dict[str, object], raw_postings))
+    if terms != sorted(terms):
+        raise SparseIndexError("sparse-terms-not-sorted")
+    totals = [0] * len(documents)
+    postings: dict[str, list[list[int]]] = {}
+    for term, raw_rows in cast(dict[str, object], raw_postings).items():
+        if (
+            not term
+            or tokenize(term) != [term]
+            or not isinstance(raw_rows, list)
+        ):
+            raise SparseIndexError("sparse-posting-term-invalid")
+        prior_document_id = -1
+        rows: list[list[int]] = []
+        for raw_row in cast(list[object], raw_rows):
+            if (
+                not isinstance(raw_row, list)
+                or len(cast(list[object], raw_row)) != 2
+                or not all(
+                    isinstance(item, int) and not isinstance(item, bool)
+                    for item in cast(list[object], raw_row)
+                )
+            ):
+                raise SparseIndexError("sparse-posting-row-invalid")
+            document_id, frequency = cast(list[int], raw_row)
+            if (
+                document_id <= prior_document_id
+                or document_id < 0
+                or document_id >= len(documents)
+                or frequency <= 0
+            ):
+                raise SparseIndexError("sparse-posting-range-invalid")
+            prior_document_id = document_id
+            totals[document_id] += frequency
+            rows.append([document_id, frequency])
+        postings[term] = rows
+    if totals != [cast(int, item["length"]) for item in documents]:
+        raise SparseIndexError("sparse-posting-total-mismatch")
+    fingerprint = value.get("source_fingerprint")
+    source_file_count = value.get("source_file_count")
+    if (
+        not isinstance(fingerprint, str)
+        or hash_pattern.fullmatch(fingerprint) is None
+        or not isinstance(source_file_count, int)
+        or isinstance(source_file_count, bool)
+        or source_file_count < 1
+    ):
+        raise SparseIndexError("sparse-source-metadata-invalid")
+    return documents, postings
+
+
 def sparse_payload(topic: str, papers_index: Path) -> dict[str, object]:
     source = _document_source(topic, papers_index)
     selected_records = [
@@ -463,13 +633,7 @@ def sparse_payload(topic: str, papers_index: Path) -> dict[str, object]:
         for document in documents
     )
     return {
-        "bm25": {
-            "b": 0.75,
-            "idf": "ln(1+(N-df+0.5)/(df+0.5))",
-            "k1": 1.5,
-            "query_term_frequency": False,
-            "tie_break": "document_id-ascending",
-        },
+        "bm25": BM25_CONTRACT,
         "average_document_length": (
             total_length / len(documents) if documents else 0.0
         ),
@@ -484,13 +648,7 @@ def sparse_payload(topic: str, papers_index: Path) -> dict[str, object]:
         "source": source_manifest,
         "source_file_count": len(source) + 1,
         "source_fingerprint": source_fingerprint,
-        "tokenizer": {
-            "ascii_pattern": "[a-z0-9]+",
-            "hangul_pattern": "[\\uAC00-\\uD7AF\\u1100-\\u11FF\\u3130-\\u318F]+",
-            "id": "ascii-alnum-hangul-bigram-v1",
-            "lowercase": "unicode-lower",
-            "unicode_normalization": "NFC",
-        },
+        "tokenizer": TOKENIZER_CONTRACT,
         "total_document_length": total_length,
         "topic": topic,
     }
@@ -504,17 +662,15 @@ def current_source_sha256(topic: str, docs_dir: Path) -> tuple[str, int]:
     return str(payload["source_fingerprint"]), cast(int, payload["document_count"])
 
 
-def build_cross_sparse_index(
+def cross_sparse_payload(
     topics: list[str],
     docs_dir: Path,
-    *,
-    durability: DurableIO | None = None,
-    run_id: str | None = None,
-    timestamp: str | None = None,
-) -> BuildResult:
+) -> dict[str, object]:
     selected_topics = sorted({_safe_topic(topic) for topic in topics})
     if not selected_topics:
         raise SparseIndexError("cross-topics-required")
+    if "_cross" in selected_topics:
+        raise SparseIndexError("cross-self-source-refused")
     docs_root = docs_dir.resolve()
     documents_by_slug: dict[str, dict[str, object]] = {}
     frequencies_by_slug: dict[str, dict[str, int]] = {}
@@ -529,6 +685,15 @@ def build_cross_sparse_index(
         if not _is_sparse_v2(value, topic):
             raise SparseIndexError(f"sparse-source-required:{topic}")
         index = cast(dict[str, object], value)
+        if raw_bytes != _canonical_json(index):
+            raise SparseIndexError(f"sparse-source-noncanonical:{topic}")
+        _ = validate_sparse_index_payload(index, topic)
+        expected_index = sparse_payload(
+            topic,
+            docs_root / "papers" / "_papers_index.json",
+        )
+        if _canonical_json(index) != _canonical_json(expected_index):
+            raise SparseIndexError(f"sparse-source-stale:{topic}")
         if bm25_contract is None:
             bm25_contract = index.get("bm25")
             tokenizer_contract = index.get("tokenizer")
@@ -645,6 +810,19 @@ def build_cross_sparse_index(
         "topics": selected_topics,
         "total_document_length": total_length,
     }
+    return payload
+
+
+def build_cross_sparse_index(
+    topics: list[str],
+    docs_dir: Path,
+    *,
+    durability: DurableIO | None = None,
+    run_id: str | None = None,
+    timestamp: str | None = None,
+) -> BuildResult:
+    docs_root = docs_dir.resolve()
+    payload = cross_sparse_payload(topics, docs_root)
     return _activate_sparse_payload(
         "_cross",
         docs_root,
