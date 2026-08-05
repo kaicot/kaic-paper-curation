@@ -56,6 +56,8 @@ def run(cmd, timeout=None, env=None):
 def build_parser():
     p = argparse.ArgumentParser(description="Paper-curation end-to-end orchestrator (3-axis)")
     p.add_argument("--topic", required=True)
+    p.add_argument("--llm-mode", choices=["codex", "off"], default=None,
+                   help="Frozen generation policy override (CLI > config > codex default).")
     p.add_argument("--mode", choices=["curate", "rebuild", "reclassify", "retime", "deploy",
                                        "audit", "fix-matching", "dedup", "validate", "recover"],
                    required=True,
@@ -157,6 +159,8 @@ def build_update_force_cmd(args, images):
     cmd = [sys.executable, "-u", str(PIPELINE / "run_update_force.py"),
            "--topic", args.topic,
            "--concurrency", str(args.concurrency)]
+    if args.llm_mode is not None:
+        cmd.extend(["--llm-mode", args.llm_mode])
     # Map our 3-axis to run_update_force's --mode
     if args.mode in ("curate", "rebuild", "reclassify", "retime"):
         cmd.extend(["--mode", args.mode])
