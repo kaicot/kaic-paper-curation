@@ -56,7 +56,11 @@ from pipeline.lib.generation_cache import (  # noqa: E402
     GenerationCache,
     GenerationCacheError,
 )
-from pipeline.lib.run_state import RunStatus  # noqa: E402
+from pipeline.lib.run_state import (  # noqa: E402
+    ResumeRequiredError,
+    RunStatus,
+    TopicBusyError,
+)
 from pipeline.geometry_figures import publish_geometry_manifest  # noqa: E402
 from pipeline.providers.codex_gateway import CodexGateway, CodexGatewayError  # noqa: E402
 from pipeline.runtime_policy import (  # noqa: E402
@@ -78,6 +82,13 @@ from pipeline.update_geometry_orchestration import (  # noqa: E402
     default_stage_plan,
     execute_plan,
     safe_child_environment,
+)
+from pipeline.release_dry_run import (  # noqa: E402
+    ArtifactValidationError,
+    build_dry_run_plan,
+    build_policy_denied_result,
+    emit as emit_release_result,
+    validate_default_artifacts,
 )
 PAPERS_DIR = str(_PAPERS_DIR)
 PROJECT_ROOT = PIPELINE_DIR.parent
@@ -250,10 +261,9 @@ COLLECTIONS: dict[str, str] = {}
 CHECKPOINT_FILE = str(PIPELINE_DIR / "_update_force_checkpoint.json")
 
 
-def _initialize_runtime(cli_mode: str | None) -> RuntimePolicy:
-    """Resolve policy before credentials, probes, writes, or worker startup."""
+def _initialize_runtime(policy: RuntimePolicy) -> RuntimePolicy:
+    """Initialize credentials only after an already-resolved Codex policy."""
     global API_KEY, COLLECTIONS, TOPIC_MODELING_PYTHON, USER_ID, ZOTERO_DIR
-    policy = resolve_runtime_policy(cast(JsonObject, load_config()), cli_mode)
     TOPIC_MODELING_PYTHON = _resolve_topic_modeling_python()
     if TOPIC_MODELING_PYTHON != sys.executable:
         print(
@@ -1174,7 +1184,14 @@ def _load_review_schema() -> JsonObject:
     return value
 
 
-REVIEW_SCHEMA = _load_review_schema()
+REVIEW_SCHEMA: JsonObject | None = None
+
+
+def _review_schema() -> JsonObject:
+    global REVIEW_SCHEMA
+    if REVIEW_SCHEMA is None:
+        REVIEW_SCHEMA = _load_review_schema()
+    return REVIEW_SCHEMA
 
 
 _REVIEW_STR_TAGS = ("essence", "known", "gap", "why", "approach", "achievement",
@@ -1258,8 +1275,9 @@ class ReviewValidationError(ValueError):
 
 
 def _validate_review_data(data: JsonObject) -> JsonObject:
-    validate_json(data, REVIEW_SCHEMA)
-    required = REVIEW_SCHEMA.get("required")
+    schema = _review_schema()
+    validate_json(data, schema)
+    required = schema.get("required")
     if not isinstance(required, list) or set(data) != set(required):
         raise ReviewValidationError("review fields must exactly match review-v1")
     for name in _REVIEW_STR_TAGS:
@@ -1356,7 +1374,7 @@ def write_review(
                 prompt_version=REVIEW_PROMPT_VERSION,
                 prompt=prompt,
                 schema_version=REVIEW_SCHEMA_VERSION,
-                schema=REVIEW_SCHEMA,
+                schema=_review_schema(),
                 source=source_bytes,
                 task_id=f"review:{slug}",
             )
@@ -1366,7 +1384,11 @@ def write_review(
 
         def _generate():
             try:
-                result = gateway.generate_json("long_form", prompt, REVIEW_SCHEMA)
+                result = gateway.generate_json(
+                    "long_form",
+                    prompt,
+                    _review_schema(),
+                )
                 return CacheSuccess(_validate_review_data(result))
             except (CodexGatewayError, ReviewValidationError, SchemaError, TypeError, ValueError):
                 return CacheFailure("failed")
@@ -1944,11 +1966,19 @@ def _run_curate(topic, *, mode=None, concurrency=16, resume=False,
         sys.argv = argv_backup
 
 
-def main():
+def _positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Paper-curation --update-force batch")
     parser.add_argument("--topic", default="ai4s", help="Topic: ai4s or scisci")
     parser.add_argument("--llm-mode", default=None)
-    parser.add_argument("--concurrency", type=int, default=16, help="Parallel workers (Tier 4 default; lower for Tier 1~3 — see README)")
+    parser.add_argument("--concurrency", type=_positive_integer, default=1,
+                        help="Serialized Codex worker count (safe profile requires 1)")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--skip-existing", action="store_true",
                         help="Skip papers that already have review.md (for --update mode)")
@@ -1996,22 +2026,98 @@ def main():
     # flags that were also specified. Omitting --mode keeps 100% legacy
     # behavior, so existing callers (incl. in-flight batches) are unaffected.
     parser.add_argument("--mode", choices=["curate", "rebuild", "reclassify", "retime"],
-                        default=None,
+                        default="curate",
                         help="New MECE mode selector. curate=new papers only (keeps existing reviews); "
                              "rebuild=regenerate all reviews; reclassify=re-run topic modeling on existing reviews; "
                              "retime=regenerate timeline narratives+images only. "
                              "When set, overrides --resume/--skip-existing/--timeline/--category combinations.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--state-dir",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    args = parser.parse_args(argv)
+    # The release dry-run boundary is deliberately before policy/config,
+    # interpreter probes, credentials, Zotero, checkpoints, leases, or writes.
+    if args.dry_run:
+        emit_release_result(
+            build_dry_run_plan(
+                entrypoint="pipeline/run_update_force.py",
+                topic=args.topic,
+                mode=args.mode,
+                concurrency=args.concurrency,
+                policy_mode=args.llm_mode or "codex",
+            )
+        )
+        return 0
+
     try:
-        runtime_policy = _initialize_runtime(args.llm_mode)
+        preview_config: JsonObject = (
+            {
+                "runtime": {
+                    "allow_paid_api": False,
+                    "llm_mode": args.llm_mode,
+                },
+                "schema_version": 2,
+            }
+            if args.llm_mode is not None
+            else cast(JsonObject, load_config())
+        )
+        preview_policy = resolve_runtime_policy(
+            preview_config,
+            args.llm_mode,
+        )
     except RuntimePolicyError as error:
         print(f"Runtime policy denied: {error.code}", file=sys.stderr)
         return 2
-    approved_python_path = approved_python()
+    if preview_policy.mode == "off":
+        emit_release_result(
+            build_policy_denied_result(
+                args.topic,
+                Path(PAPERS_DIR).parent,
+            )
+        )
+        return 3
+    _apply_mode_mapping(args)
+    runtime_policy = preview_policy
+    safe_state_root = (
+        args.state_dir.resolve()
+        if args.state_dir is not None
+        else PIPELINE_DIR / "_safe_update_state"
+    )
+    active_run = safe_state_root / "topics" / f"{args.topic}.active.json"
+    resuming_safe_run = bool(args.resume and active_run.is_file())
+    try:
+        safe_run_lease = acquire_plan_lease(
+            args.topic,
+            preview_policy,
+            state_root=safe_state_root,
+            workspace_root=PROJECT_ROOT,
+            resume=resuming_safe_run,
+        )
+    except (TopicBusyError, ResumeRequiredError) as error:
+        log(f"SAFE RUN OWNERSHIP DENIED: {error.code}")
+        return 75
+    except Exception as error:
+        log(f"SAFE RUN OWNERSHIP DENIED: {type(error).__name__}")
+        return 2
+
+    def close_safe_run(status: RunStatus) -> None:
+        if not safe_run_lease.finished:
+            safe_run_lease.finish(status)
+        safe_run_lease.release()
+
+    try:
+        runtime_policy = _initialize_runtime(preview_policy)
+        approved_python_path = approved_python()
+    except Exception as error:
+        log(f"SAFE RUN INITIALIZATION FAILED: {type(error).__name__}")
+        close_safe_run(RunStatus.FAILED)
+        return 2
 
     # Apply --mode → legacy flags mapping. Pure translation; no behavior change
     # when --mode is absent (args.mode is None → all legacy flags honored as-is).
-    _apply_mode_mapping(args)
 
     # --conn-full → force full connection regen for child subprocesses
     # (extract_insights / topic_modeling). They read CONN_FULL_REBUILD from env,
@@ -2061,7 +2167,8 @@ def main():
     collection_key = COLLECTIONS.get(args.topic, "")
     if not collection_key:
         print(f"Unknown topic: {args.topic}")
-        return
+        close_safe_run(RunStatus.FAILED)
+        return 2
 
     # Load checkpoint
     if args.resume:
@@ -2119,14 +2226,6 @@ def main():
             print(f"  {slug[:55]:55s} | method={_m} | path={_p or '(none)'}")
         print(f"[rebuild-preview] proceed if these look correct. "
               f"Ctrl-C now to abort.\n")
-
-    if args.dry_run:
-        print(f"[dry-run] would process {len(item_slug_pairs)} papers:")
-        for _, slug in item_slug_pairs[:50]:
-            print(f"  {slug}")
-        if len(item_slug_pairs) > 50:
-            print(f"  ... +{len(item_slug_pairs) - 50} more")
-        return
 
     # Skip papers with existing review.md (--skip-existing or --resume).
     # When --slugs is used the listed papers must be force-rebuilt, so they
@@ -2196,22 +2295,7 @@ def main():
     log(f"Concurrency: {args.concurrency}")
     log(f"Estimated time: ~{len(remaining) * 5 / args.concurrency / 60:.1f} hours")
 
-    # Process with thread pool
-    safe_state_root = PIPELINE_DIR / "_safe_update_state"
-    active_run = safe_state_root / "topics" / f"{args.topic}.active.json"
-    resuming_safe_run = bool(args.resume and active_run.is_file())
-    try:
-        safe_run_lease = acquire_plan_lease(
-            args.topic,
-            runtime_policy,
-            state_root=safe_state_root,
-            workspace_root=PROJECT_ROOT,
-            resume=resuming_safe_run,
-        )
-    except Exception as error:
-        log(f"SAFE RUN OWNERSHIP DENIED: {error}")
-        return 2
-
+    # Process with thread pool while the topic lease is already held.
     start_time = time.time()
     done = 0
 
@@ -2299,8 +2383,6 @@ def main():
     if not needs_postprocess:
         log("\nPost-processing skipped: no new papers, no explicit reclassify/retime, "
             "and default timeline artifacts already exist.")
-        safe_run_lease.finish(RunStatus.SUCCEEDED)
-        safe_run_lease.release()
     if needs_postprocess:
         log("\n" + "=" * 60)
         log("SAFE POST-PROCESSING: retained local stages")
@@ -2393,6 +2475,7 @@ def main():
                 runner=run_safe_stage,
                 resume=resuming_safe_run,
                 lease=safe_run_lease,
+                finalize=False,
             )
         except Exception as error:
             log(f"SAFE POST-PROCESSING FAILED: {error}")
@@ -2411,22 +2494,35 @@ def main():
         )
         if refresh_exit != 0:
             log("SAFE POST-PROCESSING FAILED: retrieval snapshot refresh")
+            close_safe_run(RunStatus.FAILED)
             return 2
 
+    try:
+        accepted_artifacts = validate_default_artifacts(
+            topic,
+            Path(PAPERS_DIR).parent,
+        )
         geometry_paths = [
-            path.relative_to(PROJECT_ROOT).as_posix()
-            for path in Path(PAPERS_DIR).glob("*/figures/manifest-v1.json")
-            if path.is_file()
+            f"docs/{artifact['path']}"
+            for row in accepted_artifacts
+            if row["stage"] == "geometry"
+            for artifact in cast(list[dict[str, str]], row["artifacts"])
         ]
         _ = artifact_manifest(
             topic,
             runtime_policy,
             PROJECT_ROOT,
             geometry_paths=geometry_paths,
+            validators=accepted_artifacts,
         )
-        log("\n  [prepare_deploy] SKIP: deployment is outside the local-safe profile")
-        log("\nPost-processing complete!")
+    except (ArtifactValidationError, OSError, ValueError) as error:
+        log(f"SAFE ARTIFACT ACCEPTANCE FAILED: {error}")
+        close_safe_run(RunStatus.FAILED)
+        return 2
 
+    close_safe_run(RunStatus.SUCCEEDED)
+    log("\n  [prepare_deploy] SKIP: deployment is outside the local-safe profile")
+    log("\nPost-processing complete!")
     return 0
 
 

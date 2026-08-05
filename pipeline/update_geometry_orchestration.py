@@ -292,6 +292,7 @@ def execute_plan(
     runner: Callable[[Stage], None],
     resume: bool = False,
     lease: RunLease | None = None,
+    finalize: bool = True,
 ) -> dict[str, object]:
     digest = policy_digest(policy)
     events: list[dict[str, str]] = []
@@ -328,7 +329,8 @@ def execute_plan(
             artifacts = _artifact_rows(workspace_root, stage.outputs)
             lease.complete_stage(stage.name, artifacts)
             events.append({"stage": stage.name, "status": "succeeded"})
-        lease.finish(RunStatus.SUCCEEDED)
+        if finalize:
+            lease.finish(RunStatus.SUCCEEDED)
     except BaseException:
         if not lease.finished:
             lease.finish(RunStatus.FAILED)
@@ -368,8 +370,71 @@ def artifact_manifest(
     policy: RuntimePolicy,
     workspace_root: Path,
     *,
-    geometry_paths: Iterable[str],
+    geometry_paths: Iterable[str] = (),
+    validators: Sequence[Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
+    if validators is not None:
+        expected = (
+            "review",
+            "geometry",
+            "paper-index",
+            "classification",
+            "summary",
+            "connection",
+            "timeline",
+            "html",
+            "bm25",
+            "topic-index",
+            "rss",
+            "moc",
+        )
+        stages = tuple(row.get("stage") for row in validators)
+        if stages != expected:
+            raise ValueError("artifact validator registry is not exact")
+        named: list[dict[str, object]] = []
+        normalized: list[dict[str, object]] = []
+        for row in validators:
+            artifacts = row.get("artifacts")
+            if row.get("status") != "valid" or not isinstance(artifacts, list):
+                raise ValueError("artifact validator did not pass")
+            normalized_artifacts: list[dict[str, str]] = []
+            for artifact in artifacts:
+                if not isinstance(artifact, dict):
+                    raise ValueError("artifact validator row is invalid")
+                path = artifact.get("path")
+                sha256 = artifact.get("sha256")
+                if not isinstance(path, str) or not isinstance(sha256, str):
+                    raise ValueError("artifact validator hash is invalid")
+                normalized_artifacts.append(
+                    {"path": path, "sha256": sha256}
+                )
+                named.append(
+                    {
+                        "exists": True,
+                        "name": row["stage"],
+                        "path": f"docs/{path}",
+                        "sha256": sha256,
+                    }
+                )
+            normalized.append(
+                {
+                    "artifacts": normalized_artifacts,
+                    "stage": row["stage"],
+                    "status": "valid",
+                }
+            )
+        manifest: dict[str, object] = {
+            "outputs": named,
+            "policy_sha256": policy_digest(policy),
+            "schema": "artifact-manifest-v1",
+            "topic": topic,
+            "validator_count": len(normalized),
+            "validators": normalized,
+        }
+        output = workspace_root / "docs" / topic / "_artifact_manifest-v1.json"
+        _atomic_write_json(output, manifest)
+        return manifest
+
     geometry_list = sorted(geometry_paths)
     paper_slugs = sorted(
         {
