@@ -1,0 +1,1 @@
+{"$id":"https://paper-curation.local/schemas/category-summary-v1.json","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"description_ko":{"minLength":50,"type":"string"}},"required":["description_ko"],"type":"object"}
