@@ -135,6 +135,11 @@ def computed_shape(rows: list[JsonObject]) -> str:
     return digest_bytes(canonical(rows))
 
 
+def digest_manifest_input(path: Path) -> str:
+    """Hash repository text without platform-specific checkout line endings."""
+    return digest_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+
+
 def generated_manifest(baseline: str, patterns_path: Path, lock_path: Path, rows: list[JsonObject]) -> JsonObject:
     """Build the canonical provider-entrypoints-v1 document."""
     entries: list[JsonValue] = []
@@ -166,8 +171,8 @@ def generated_manifest(baseline: str, patterns_path: Path, lock_path: Path, rows
             "lexical_file_count": lexical_count,
         },
         "computed_shape_sha256": computed_shape(rows),
-        "patterns_sha256": digest(patterns_path),
-        "scanner_lock_sha256": digest(lock_path),
+        "patterns_sha256": digest_manifest_input(patterns_path),
+        "scanner_lock_sha256": digest_manifest_input(lock_path),
         "entrypoints": entries,
     }
 
