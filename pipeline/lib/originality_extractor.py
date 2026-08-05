@@ -4,8 +4,7 @@ Ported from scisci/scie/lib/originality.py.
 
 Strategy:
 1. Primary: rule-based trigger matching (free, instant)
-2. Fallback: LLM (Claude Haiku) when rule-based finds nothing
-3. Self-learning: LLM-discovered triggers added to triggers JSON
+2. No match: return an empty string without external work
 """
 import json
 import re
@@ -164,104 +163,12 @@ Text:
 """
 
 
-def _parse_json_response(text):
-    """Parse JSON from LLM response."""
-    text = text.strip()
-    if text.startswith("```"):
-        first_nl = text.index("\n") if "\n" in text else len(text)
-        text = text[first_nl + 1:]
-        if "```" in text:
-            text = text[:text.rindex("```")]
-        text = text.strip()
-    return json.loads(text)
-
-
-def _llm_fallback(text):
-    """Claude Haiku로 originality 추출."""
-    try:
-        from anthropic import Anthropic
-        client = Anthropic()
-        resp = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=1024,
-            temperature=0,
-            messages=[{"role": "user", "content": LLM_PROMPT.format(text=text)}],
-        )
-        result = _parse_json_response(resp.content[0].text)
-        sentences = result.get("originality_sentences", [])
-        triggers = result.get("trigger_phrases", [])
-        out = ". ".join(sentences) if sentences else ""
-        return _strip_metadata_leaks(out), triggers
-    except Exception:
-        return "", []
-
-
-def _update_triggers(triggers_data, new_triggers):
-    """LLM이 발견한 trigger를 JSON에 추가 (self-learning)."""
-    if not new_triggers:
-        return 0
-
-    added = 0
-    existing = set(w.strip().lower() for w in triggers_data["all"])
-
-    for trigger in new_triggers:
-        trigger = trigger.strip().lower()
-        if len(trigger) < 4:
-            continue
-        if trigger in existing:
-            continue
-        if trigger.strip() in _STOP_TRIGGERS:
-            continue
-        words = trigger.split()
-        has_verb = any(w.endswith(("ed", "ing", "ize", "ise", "ate", "ify")) for w in words)
-        if len(words) < 2 and not has_verb:
-            continue
-
-        if "rule_base_learned" not in triggers_data["categories"]:
-            triggers_data["categories"]["rule_base_learned"] = []
-        triggers_data["categories"]["rule_base_learned"].append(trigger)
-        triggers_data["all"].append(trigger)
-        existing.add(trigger)
-        added += 1
-
-    if added > 0 and "_path" in triggers_data:
-        save_data = dict(triggers_data["categories"])
-        save_data["_version"] = "2026.1-live"
-        save_data["_description"] = "Auto-updated by LLM fallback learning"
-        with open(triggers_data["_path"], "w", encoding="utf-8") as f:
-            json.dump(save_data, f, indent=4, ensure_ascii=False)
-
-    return added
 
 
 def extract_originality(text, triggers=None):
-    """Extract originality: rule-based first, LLM fallback if empty, self-learning.
-
-    Args:
-        text: Paper text (first ~1000 chars recommended)
-        triggers: Pre-loaded triggers dict, or None to auto-load
-
-    Returns:
-        Originality string (joined sentences), or empty string
-    """
+    """Return deterministic trigger-matched originality sentences."""
     if not text or not text.strip():
         return ""
-
     if triggers is None:
         triggers = load_triggers()
-
-    # 1. Rule-based
-    result = _extract_rule_based(text, triggers)
-    if result:
-        return result
-
-    # 2. LLM fallback
-    result, new_triggers = _llm_fallback(text)
-
-    # 3. Self-learning
-    if new_triggers:
-        learned = _update_triggers(triggers, new_triggers)
-        if learned > 0:
-            pass  # logging handled by caller if needed
-
-    return result
+    return _extract_rule_based(text, triggers)

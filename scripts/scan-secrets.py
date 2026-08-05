@@ -28,7 +28,7 @@ from pathlib import Path
 ZERO_RE = re.compile(r"^0+$")
 PINNED_BASELINE = "fc49f2672dcbb4779fa36b31ea5eceb44c090503"
 RAW_PATTERNS = (
-    ("Anthropic/OpenAI", re.compile(rb"sk-(?:ant|proj)-[A-Za-z0-9_-]{20,}")),
+    ("Commercial model key", re.compile(rb"sk-(?:ant|proj)-[A-Za-z0-9_-]{20,}")),
     ("AWS access key", re.compile(rb"AKIA[0-9A-Z]{16}")),
     ("GitHub token", re.compile(rb"gh[pousr]_[A-Za-z0-9]{20,}")),
     ("Google API key", re.compile(rb"AIza[0-9A-Za-z_-]{35}")),

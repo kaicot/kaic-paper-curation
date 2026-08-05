@@ -398,6 +398,7 @@ def poison_import_modules(root: Path, modules: tuple[str, ...]) -> list[str]:
 import builtins
 import importlib
 import importlib.abc
+import importlib.util
 import json
 import os
 import pathlib
@@ -468,11 +469,25 @@ subprocess.check_output = denied
 
 imported = []
 for name in sys.argv[2:]:
-    module = importlib.import_module(name)
+    if name.startswith("@"):
+        relative = name[1:]
+        source_path = root / relative
+        synthetic = "_boundary_" + "".join(
+            character if character.isalnum() else "_"
+            for character in relative
+        )
+        spec = importlib.util.spec_from_file_location(synthetic, source_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("provider-import-spec-poison:" + relative)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[synthetic] = module
+        spec.loader.exec_module(module)
+    else:
+        module = importlib.import_module(name)
     module_path = pathlib.Path(module.__file__).resolve()
     if root not in module_path.parents:
         raise RuntimeError("provider-import-provenance-poison:" + name)
-    imported.append(name)
+    imported.append(name[1:] if name.startswith("@") else name)
 if any(
     name in provider_roots
     or name in provider_prefixes
@@ -505,7 +520,7 @@ def _module_name(path: str) -> str:
     if parts[-1] == "__init__":
         _ = parts.pop()
     if not parts or not all(part.isidentifier() for part in parts):
-        raise InventoryError(f"provider-poison import path is not a module: {path}")
+        return "@" + path
     return ".".join(parts)
 
 
