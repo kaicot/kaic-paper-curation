@@ -18,11 +18,13 @@ from pipeline.sparse_index import (  # noqa: E402
     SparseIndexError,
     build_cross_sparse_index,
 )
+from pipeline.refresh_retrieval_eval_snapshot import (  # noqa: E402
+    main as refresh_evaluation_snapshot,
+)
 
 
 DOCS_DIR = ROOT / "docs"
 SEARCH_INDEX = ACTIVE_NAME
-EMB_BIN = "_search_index_emb.bin"
 
 
 def build_cross_index(
@@ -60,6 +62,19 @@ def main(argv: list[str] | None = None) -> int:
         )
     except SparseIndexError as error:
         print(f"Cross sparse index denied: {error}", file=sys.stderr)
+        return 2
+    refresh_exit = refresh_evaluation_snapshot(
+        [
+            "--project-root",
+            str(cast(Path, arguments.docs_dir).resolve().parent),
+            "--if-installed",
+        ]
+    )
+    if refresh_exit != 0:
+        print(
+            "Cross sparse index built, but retrieval snapshot refresh failed",
+            file=sys.stderr,
+        )
         return 2
     print(output)
     return 0

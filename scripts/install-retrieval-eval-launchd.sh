@@ -29,7 +29,6 @@ value = {
     "ProgramArguments": [
         "/usr/bin/python3", str(evaluation),
         "--queries", str(eval_dir / "retrieval_queries.jsonl"),
-        "--vectors", str(eval_dir / "retrieval_query_vectors.json"),
         "--all",
         "--baseline", str(eval_dir / "retrieval_baseline.json"),
         "--min-recall-at-5", "0",

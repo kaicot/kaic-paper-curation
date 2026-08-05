@@ -2398,6 +2398,21 @@ def main():
             log(f"SAFE POST-PROCESSING FAILED: {error}")
             return 2
 
+        from pipeline.refresh_retrieval_eval_snapshot import (
+            main as refresh_retrieval_snapshot,
+        )
+
+        refresh_exit = refresh_retrieval_snapshot(
+            [
+                "--project-root",
+                str(PROJECT_ROOT),
+                "--if-installed",
+            ]
+        )
+        if refresh_exit != 0:
+            log("SAFE POST-PROCESSING FAILED: retrieval snapshot refresh")
+            return 2
+
         geometry_paths = [
             path.relative_to(PROJECT_ROOT).as_posix()
             for path in Path(PAPERS_DIR).glob("*/figures/manifest-v1.json")
