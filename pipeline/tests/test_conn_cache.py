@@ -31,6 +31,7 @@ Run:
 import os
 import sys
 import tempfile
+import unittest
 
 # Import ONLY the dependency-light targets — add pipeline/lib to sys.path so
 # `import conn_cache` / `import connections` resolve the single files directly
@@ -84,8 +85,8 @@ def main():
     heavy = [m for m in ("umap", "hdbscan", "sentence_transformers", "torch",
                           "numba", "llvmlite")
              if m in sys.modules]
-    check("conn_cache imported", "conn_cache" in sys.modules)
-    check("connections imported", "connections" in sys.modules)
+    check("conn_cache imported", "lib.conn_cache" in sys.modules)
+    check("connections imported", "lib.connections" in sys.modules)
     check(f"no heavy deps loaded (found: {heavy or 'none'})", not heavy)
 
     # ── candidates: {slug: [(target, score), ...]} as compute_related_candidates returns
@@ -389,5 +390,10 @@ def main():
     print("RESULT: ALL PASS")
 
 
+class ConnectionCacheTests(unittest.TestCase):
+    def test_incremental_cache_and_hub_preservation(self):
+        _ = main()
+
+
 if __name__ == "__main__":
-    main()
+    _ = unittest.main()

@@ -10,6 +10,7 @@ Run: PYTHONUTF8=1 /opt/homebrew/Caskroom/miniconda/base/envs/py312/bin/python \
 """
 import os
 import sys
+import unittest
 
 # NOTE: `pipeline/lib` 를 sys.path 에 직접 넣으면 안 된다. 그 디렉토리의
 # `dateutil.py` 가 표준 `python-dateutil` 패키지를 가려서, 같은 프로세스에서
@@ -82,5 +83,10 @@ def main():
     print("RESULT: ALL PASS")
 
 
+class ConnectionRemapTests(unittest.TestCase):
+    def test_stale_slug_remap_and_prune(self):
+        _ = main()
+
+
 if __name__ == "__main__":
-    main()
+    _ = unittest.main()
