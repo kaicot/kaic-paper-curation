@@ -26,7 +26,7 @@ Pipeline contract:
       bundle keys: hdbscan_model, umap_cluster, centroids,
                    tid_to_cat, tid_to_subname
   * Reads `{topic}/_embeddings_cache.json` (slug → 768D SPECTER2)
-  * 신규 임베딩은 `topic_modeling.compute_embeddings` 로 즉시 계산 (cache 갱신).
+  * 신규 임베딩은 명시적으로 준비된 local model cache로만 계산한다.
   * Updates `docs/papers/_papers_index.json` (classifications[topic] 갱신)
   * Rewrites `{topic}/_new_classification.json` (assignments 재기록)
 
@@ -52,7 +52,11 @@ from pathlib import Path
 
 import numpy as np
 
-from config_loader import PAPERS_DIR as _PAPERS_DIR, get_topic_dir
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.config_loader import PAPERS_DIR as _PAPERS_DIR, get_topic_dir  # noqa: E402
 PAPERS_DIR = str(_PAPERS_DIR)
 
 TOP_N_CATEGORIES = 3
@@ -91,7 +95,7 @@ def load_bundle(topic_dir):
     # 현재 분류에 쓸 임베딩 모드와 대조한다. 다르면 신 모델 벡터를 구 모델
     # manifold 에 투영하는 셈이라 분류가 조용히 망가진다 (approximate_predict 가
     # 엉뚱한 sub-cluster 로 보냄). 구 번들에는 키가 없으므로 base/mean 으로 간주.
-    from lib import specter2_embed
+    from pipeline.lib import specter2_embed
     bundle_tag = bundle.get("embed_model", "specter2_base_mean")
     if bundle_tag != specter2_embed.EMBED_TAG:
         log("ERROR: 분류 임베딩 모드가 학습된 모델 번들과 다릅니다 "
@@ -180,6 +184,12 @@ def _run_classify(topic, *, slugs=None, dry_run=False):
 
     `slugs` may be a list of slug-prefixes or a comma-separated string.
     """
+    from pipeline.lib import specter2_embed
+    cache_status = specter2_embed.local_cache_status()
+    if not cache_status["available"]:
+        log("[unavailable] local SPECTER2 cache is missing or invalid")
+        return {"status": "unavailable", "reason": "specter2-cache-unavailable"}
+
     if isinstance(slugs, str):
         slugs_str = slugs
     elif slugs:
@@ -205,7 +215,7 @@ def _run_classify(topic, *, slugs=None, dry_run=False):
 
     # 3. Embeddings (incremental cache; SPECTER2 on demand)
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from topic_modeling import extract_originalities, compute_embeddings
+    from pipeline.topic_modeling import extract_originalities, compute_embeddings
     originalities = extract_originalities(topic_papers)
     cache_path = os.path.join(topic_dir, "_embeddings_cache.json")
     embeddings, slugs = compute_embeddings(originalities, cache_path)
@@ -287,7 +297,7 @@ def _run_classify(topic, *, slugs=None, dry_run=False):
         return
 
     # Write back
-    from lib.atomic_io import atomic_write_json
+    from pipeline.lib.atomic_io import atomic_write_json
     atomic_write_json(index_path, all_papers)
     log(f"[write] {index_path}")
 
@@ -352,10 +362,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="Print assignment summary without writing JSONs.")
     args = ap.parse_args()
-    _run_classify(topic=args.topic, slugs=args.slugs, dry_run=args.dry_run)
+    result = _run_classify(topic=args.topic, slugs=args.slugs, dry_run=args.dry_run)
+    return 0 if result is None or result.get("status") != "unavailable" else 2
 
 
 if __name__ == "__main__":
-    from _env_guard import force_py312
+    from pipeline._env_guard import force_py312
     force_py312()
-    main()
+    raise SystemExit(main())
