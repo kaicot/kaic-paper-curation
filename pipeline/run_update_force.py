@@ -49,7 +49,6 @@ from pipeline.config_loader import (  # noqa: E402
     get_zotero_user_id,
     load_config,
 )
-from pipeline.lib.categories import category_slug  # noqa: E402
 from pipeline.lib.generation_cache import (  # noqa: E402
     CacheFailure,
     CacheIdentity,
@@ -57,6 +56,8 @@ from pipeline.lib.generation_cache import (  # noqa: E402
     GenerationCache,
     GenerationCacheError,
 )
+from pipeline.lib.run_state import RunStatus  # noqa: E402
+from pipeline.geometry_figures import publish_geometry_manifest  # noqa: E402
 from pipeline.providers.codex_gateway import CodexGateway, CodexGatewayError  # noqa: E402
 from pipeline.runtime_policy import (  # noqa: E402
     RuntimePolicy,
@@ -68,27 +69,18 @@ from pipeline.schemas.codex_schema import (  # noqa: E402
     SchemaError,
     validate_json,
 )
+from pipeline.update_geometry_orchestration import (  # noqa: E402
+    Stage,
+    acquire_plan_lease,
+    approved_python,
+    artifact_manifest,
+    build_transitional_sparse_index,
+    default_stage_plan,
+    execute_plan,
+    safe_child_environment,
+)
 PAPERS_DIR = str(_PAPERS_DIR)
 PROJECT_ROOT = PIPELINE_DIR.parent
-
-
-def _split_cats_by_image_presence(topic, cats):
-    """Split categories by whether their timeline image exists.
-
-    Returns (cats_with_image, cats_missing_image).
-    Image path: docs/{topic}/category_timeline_{slug}.{png,webp}
-    """
-    topic_dir = get_topic_dir(topic)
-    with_image = []
-    missing = []
-    for cat in cats:
-        slug = category_slug(cat)
-        has_image = any(
-            os.path.exists(os.path.join(str(topic_dir), f"category_timeline_{slug}.{ext}"))
-            for ext in ("png", "webp")
-        )
-        (with_image if has_image else missing).append(cat)
-    return with_image, missing
 
 
 def _topic_default_artifacts_missing(topic):
@@ -106,41 +98,11 @@ def _topic_default_artifacts_missing(topic):
         "_category_summaries.json",
         "_category_narratives.json",
         "_timeline_narrative.json",
-        "research_timeline.png",
     ]
     for name in required:
         path = os.path.join(topic_dir_str, name)
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             missing.append(name)
-
-    expected_categories = []
-    cls_path = os.path.join(topic_dir_str, "_new_classification.json")
-    if os.path.exists(cls_path):
-        try:
-            with open(cls_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for c in data.get("categories", []):
-                name = c.get("name") if isinstance(c, dict) else str(c)
-                if name and name != "Other":
-                    expected_categories.append(name)
-        except Exception:
-            expected_categories = []
-
-    if expected_categories:
-        for cat in expected_categories:
-            slug = category_slug(cat)
-            has_image = any(
-                os.path.exists(os.path.join(topic_dir_str, f"category_timeline_{slug}.{ext}"))
-                and os.path.getsize(os.path.join(topic_dir_str, f"category_timeline_{slug}.{ext}")) > 0
-                for ext in ("png", "webp")
-            )
-            if not has_image:
-                missing.append(f"category_timeline_{slug}.png")
-    elif not os.path.isdir(topic_dir_str) or not any(
-        name.startswith("category_timeline_") and name.endswith((".png", ".webp"))
-        for name in os.listdir(topic_dir_str)
-    ):
-        missing.append("category_timeline_*.png")
 
     return missing
 
@@ -1125,6 +1087,26 @@ def extract_figures(pdf_path, slug_dir):
             except OSError:
                 pass
 
+    descriptor_by_number = {
+        int(candidate["fig_num"]): candidate
+        for candidate in all_nums
+        if str(candidate.get("fig_num", "")).isdigit()
+    }
+    for orphan in orphan_caps:
+        number = int(orphan.get("fig_num", 0))
+        descriptor_by_number.setdefault(number, orphan)
+    figures = []
+    for number, descriptor in sorted(descriptor_by_number.items()):
+        path = os.path.join(fig_dir, f"fig{number}.png")
+        if _fig_ok(path):
+            figures.append(
+                {
+                    "caption": str(descriptor.get("caption", "")),
+                    "name": str(number),
+                    "page": int(descriptor.get("page", 0)),
+                }
+            )
+
     doc.close()
     return figures
 
@@ -1775,7 +1757,15 @@ def _do_process(item, slug, slug_dir, pdf_path, runtime_policy=None):
 
     # Extract figures
     log(f"  {slug}: extracting figures...")
-    figures = extract_figures(pdf_path, slug_dir)
+    try:
+        figures = extract_figures(pdf_path, slug_dir)
+    except Exception as error:
+        log(f"  {slug}: geometry extraction failed ({type(error).__name__})")
+        figures = []
+    if os.path.isfile(pdf_path):
+        _ = publish_geometry_manifest(pdf_path, slug_dir, figures)
+    else:
+        log(f"  {slug}: geometry manifest skipped (source PDF missing)")
     log(f"  {slug}: {len(figures)} figures extracted")
 
     # Write review
@@ -1964,7 +1954,7 @@ def main():
                         help="Skip papers that already have review.md (for --update mode)")
     parser.add_argument("--limit", type=int, default=0, help="Limit papers (0=all)")
     parser.add_argument("--timeline", action="store_true",
-                        help="Regenerate timeline images (with --resume: changed cats only, alone: all cats)")
+                        help="Regenerate text timelines (with --resume: changed categories only)")
     parser.add_argument("--ensure-timeline", action="store_true",
                         help="기본 narrative/timeline 산출물이 없으면 생성하고, 업데이트 중 바뀐 카테고리만 보강한다.")
     parser.add_argument("--category", action="store_true",
@@ -1987,10 +1977,11 @@ def main():
     parser.add_argument("--insights", action="store_true",
                         help="extract_insights 에서 cross-category insights(Option)까지 재생성. "
                              "기본은 paper connections(Core, '같이 보면 좋은 논문')만 생성 (--only connections).")
-    parser.add_argument("--local-fallback", action="store_true",
-                        help="topic_modeling 연결 단계에서 max retry round 를 다 돌고도 막힌 "
-                             "papers 를 로컬 호환 모델로 마저 연결. "
-                             "config.json 의 local_model 또는 LOCAL_MODEL_BASE_URL/NAME 필요.")
+    parser.add_argument(
+        "--local-fallback",
+        action="store_true",
+        help="Deprecated compatibility flag; no alternative model is invoked.",
+    )
     parser.add_argument("--no-deploy", action="store_true",
                         help="end-of-run prepare_deploy(wrangler deploy + gh-pages + master push)를 건너뛴다. "
                              "무인 자동복구(auto_recover --execute)처럼 배포를 원치 않는 경우용. "
@@ -2016,6 +2007,7 @@ def main():
     except RuntimePolicyError as error:
         print(f"Runtime policy denied: {error.code}", file=sys.stderr)
         return 2
+    approved_python_path = approved_python()
 
     # Apply --mode → legacy flags mapping. Pure translation; no behavior change
     # when --mode is absent (args.mode is None → all legacy flags honored as-is).
@@ -2172,6 +2164,14 @@ def main():
         except Exception as _e:
             log(f"[pdf-change] check skipped: {_e}")
 
+    if forced_slugs:
+        cp["completed"] = [
+            slug
+            for slug in cp.get("completed", [])
+            if slug not in forced_slugs
+        ]
+        save_checkpoint(cp)
+
     if args.skip_existing or args.resume:
         skipped = 0
         for item, slug in item_slug_pairs:
@@ -2197,6 +2197,21 @@ def main():
     log(f"Estimated time: ~{len(remaining) * 5 / args.concurrency / 60:.1f} hours")
 
     # Process with thread pool
+    safe_state_root = PIPELINE_DIR / "_safe_update_state"
+    active_run = safe_state_root / "topics" / f"{args.topic}.active.json"
+    resuming_safe_run = bool(args.resume and active_run.is_file())
+    try:
+        safe_run_lease = acquire_plan_lease(
+            args.topic,
+            runtime_policy,
+            state_root=safe_state_root,
+            workspace_root=PROJECT_ROOT,
+            resume=resuming_safe_run,
+        )
+    except Exception as error:
+        log(f"SAFE RUN OWNERSHIP DENIED: {error}")
+        return 2
+
     start_time = time.time()
     done = 0
 
@@ -2266,431 +2281,138 @@ def main():
     # ── Post-processing: rebuild index, classify, insights, topic page ──
     topic = args.topic
     newly_completed = {slug for _item, slug in remaining if slug in cp.get("completed", [])}
-    do_timeline_images = args.timeline or args.category  # --category auto-enables timeline
+    do_timeline_text = args.timeline or args.category
     do_ensure_timeline = getattr(args, "ensure_timeline", False)
     missing_default_artifacts = (
         _topic_default_artifacts_missing(topic)
-        if (do_ensure_timeline or do_timeline_images)
+        if (do_ensure_timeline or do_timeline_text)
         else []
     )
-    needs_postprocess = (
+    base_needs_postprocess = (
         bool(newly_completed)
         or (len(cp["completed"]) > 0 and not args.resume)
         or bool(args.timeline)
         or bool(args.category)
         or bool(missing_default_artifacts)
     )
+    needs_postprocess = base_needs_postprocess or resuming_safe_run
     if not needs_postprocess:
         log("\nPost-processing skipped: no new papers, no explicit reclassify/retime, "
             "and default timeline artifacts already exist.")
+        safe_run_lease.finish(RunStatus.SUCCEEDED)
+        safe_run_lease.release()
     if needs_postprocess:
         log("\n" + "=" * 60)
-        log("POST-PROCESSING: index → classify → summaries → insights → HTML → topic index")
+        log("SAFE POST-PROCESSING: retained local stages")
         log("=" * 60)
 
-        is_update = args.resume  # --resume implies update mode
-        do_reclassify = args.category  # --category forces topic_modeling
+        all_slugs = sorted(set(cp.get("completed", [])))
+        validated_review_slugs = [
+            slug
+            for slug in all_slugs
+            if (
+                (Path(PAPERS_DIR) / slug / "review.md").is_file()
+                and (
+                    Path(PAPERS_DIR)
+                    / slug
+                    / "figures"
+                    / "manifest-v1.json"
+                ).is_file()
+            )
+        ]
+        planned = default_stage_plan(
+            topic,
+            runtime_policy,
+            executable=approved_python_path,
+            paper_slugs=all_slugs,
+        )
+        runnable = []
+        for stage in planned:
+            if stage.name in {"review", "geometry"}:
+                if not validated_review_slugs:
+                    continue
+                if stage.name == "review":
+                    outputs = tuple(
+                        f"docs/papers/{slug}/review.md"
+                        for slug in validated_review_slugs
+                    )
+                    names = tuple("review" for _ in outputs)
+                else:
+                    outputs = tuple(
+                        f"docs/papers/{slug}/figures/manifest-v1.json"
+                        for slug in validated_review_slugs
+                    )
+                    names = tuple("geometry" for _ in outputs)
+                runnable.append(Stage(stage.name, (), outputs, names))
+                continue
+            runnable.append(stage)
 
-        # extract_insights 는 paper connections(Core — '같이 보면 좋은 논문' 박스)만
-        # 기본 생성한다. cross-category insights 는 Option 이라 --insights 가 명시될
-        # 때만 둘 다(--only all) 돌린다. 미생성 시 _insights.json 은 stale/absent 로
-        # 남고 build_topic_index 가 부재를 허용한다.
-        insights_only_arg = ["--only", "all" if args.insights else "connections"]
-
-
-        # Steps in this set MUST succeed — any non-zero exit, timeout, or
-        # unexpected exception aborts the whole orchestration. Soft-failing
-        # them would leave the topic with stale classifications (so new
-        # papers vanish from the index) or stale per-category text (so
-        # downstream renders mis-attribute work to wrong categories).
-        # Anything not in this set may degrade gracefully (LLM narrative,
-        # image generation, search index).
-        CRITICAL_STEPS = {
-            "build_papers_index",
-            "topic_modeling",
-            "topic_modeling (coords+connections)",
-            "topic_modeling (umap fix)",
-            "classify_papers",
-            "build_search_index",
-            "build_cross_index",
-            "evaluate_retrieval",
-            "evaluate_retrieval (_cross)",
-            "refresh_retrieval_eval_snapshot",
+        timeouts = {
+            "classification": 3600,
+            "summary": 1200,
+            "connection": 14400,
+            "timeline": 21600,
         }
 
-        def run_step(step_name, cmd, step_timeout=600):
-            log(f"  [{step_name}] ...")
-            is_critical = step_name in CRITICAL_STEPS
-            try:
-                result = subprocess.run(
-                    cmd, cwd=str(PIPELINE_DIR.parent),
-                    capture_output=True, text=True, timeout=step_timeout,
-                    env={**os.environ, "PYTHONUTF8": "1"},
-                )
-                if result.returncode != 0:
-                    severity = "ABORT" if is_critical else "FAILED"
-                    log(f"  [{step_name}] {severity} (exit {result.returncode})")
-                    # Dump full stderr + stdout to disk so the real traceback
-                    # (often >200 chars) survives for diagnosis.
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    safe_step = re.sub(r'[^A-Za-z0-9_-]+', '_', step_name)[:50]
-                    dump_path = PIPELINE_DIR / "_logs" / f"step_failure_{safe_step}_{ts}.log"
-                    try:
-                        dump_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(dump_path, "w", encoding="utf-8") as f:
-                            f.write(f"=== command ===\n")
-                            f.write(" ".join(str(c) for c in cmd) + "\n")
-                            f.write(f"\n=== exit code: {result.returncode} ===\n")
-                            f.write(f"\n=== STDERR ({len(result.stderr or '')} chars) ===\n")
-                            f.write(result.stderr or "(empty)\n")
-                            f.write(f"\n=== STDOUT ({len(result.stdout or '')} chars) ===\n")
-                            f.write(result.stdout or "(empty)\n")
-                        log(f"    [diag] full output dumped: {dump_path}")
-                    except Exception as _dump_e:
-                        log(f"    [diag] dump failed: {_dump_e}")
-                    # Console: last 30 lines of stderr (not first 200 chars) —
-                    # tracebacks are most useful at the tail.
-                    if result.stderr:
-                        last = result.stderr.rstrip().splitlines()[-30:]
-                        for ln in last:
-                            log(f"    {ln}")
-                    if is_critical:
-                        raise RuntimeError(
-                            f"critical step '{step_name}' failed "
-                            f"(exit {result.returncode}); aborting orchestration. "
-                            f"See {dump_path} for full output."
-                        )
-                else:
-                    out_lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
-                    if out_lines:
-                        log(f"  [{step_name}] OK: {out_lines[-1][:100]}")
-                    else:
-                        log(f"  [{step_name}] OK")
-            except subprocess.TimeoutExpired:
-                log(f"  [{step_name}] TIMEOUT ({step_timeout}s)")
-                if is_critical:
+        def run_safe_stage(stage):
+            if not stage.argv:
+                if resuming_safe_run:
                     raise RuntimeError(
-                        f"critical step '{step_name}' timed out "
-                        f"after {step_timeout}s; aborting orchestration."
+                        f"in-process artifact changed before resume: {stage.name}"
                     )
-            except RuntimeError:
-                raise  # critical-step abort: re-raise as-is
-            except Exception as e:
-                log(f"  [{step_name}] ERROR: {str(e)[:100]}")
-                if is_critical:
-                    raise RuntimeError(
-                        f"critical step '{step_name}' raised {type(e).__name__}; "
-                        "aborting orchestration."
-                    ) from e
+                log(f"  [{stage.name}] REUSED: validated in-process artifact")
+                return
+            if stage.name == "bm25":
+                _ = build_transitional_sparse_index(topic, PROJECT_ROOT)
+                log("  [bm25] OK: deterministic sparse v2 sidecar")
+                return
+            log(f"  [{stage.name}] ...")
+            result = subprocess.run(
+                list(stage.argv),
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=timeouts.get(stage.name, 600),
+                env=safe_child_environment(runtime_policy),
+            )
+            if result.returncode != 0:
+                diagnostic = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    f"safe stage '{stage.name}' failed "
+                    f"(exit {result.returncode}): {diagnostic[-1000:]}"
+                )
+            log(f"  [{stage.name}] OK")
 
-        # Step 1: Always rebuild index
-        run_step("build_papers_index",
-                 ["python", "pipeline/build_papers_index.py", "--topic", topic])
-
-        # Step 1.5: 피인용수·레퍼런스 (citations.md / references.md)
-        #
-        # build_papers_index 직후에 둔다 — `_papers_index.json` 이 방금 갱신돼
-        # 대상 목록이 정확하고, run_metrics 가 되쓰는 피인용수 캐시를 이후
-        # 단계(classify / build_topic_index / build_search_index)가 그대로
-        # 읽을 수 있다.
-        #
-        # 기본이 30일 증분이라 매 사이클 돌려도 비용이 거의 없다. 새로 리뷰된
-        # 논문은 citations.md 가 없으므로 항상 대상에 들어간다.
-        #
-        # **soft step 이다** — 외부 API(Crossref/OpenAlex/Scopus) 장애나 망
-        # 문제로 지표를 못 받는 것이 리뷰 파이프라인 전체를 중단시켜서는 안 된다.
-        # CRITICAL_STEPS 에 넣지 않은 이유다.
-        if not getattr(args, "skip_metrics", False):
-            run_step("run_metrics",
-                     ["python", "pipeline/run_metrics.py", "--quiet"],
-                     step_timeout=5400)
-
-        # Step 2: topic_modeling
-        # --category: always run (reclassify all)
-        # --resume without --category: skip (keep existing categories)
-        # full mode: always run
-        # opt-in: connection 단계가 끝까지 막히면 로컬 모델로 마저 연결 (--local-fallback)
-        tm_local = ["--local-fallback"] if getattr(args, "local_fallback", False) else []
-        old_cats_by_slug = {}
-        if do_reclassify:
-            # Snapshot current classifications before reclassification
-            try:
-                idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-                with open(idx_path, "r", encoding="utf-8") as f:
-                    idx = json.load(f)
-                for p in idx:
-                    cls = p.get("classifications", {}).get(topic, {})
-                    old_cats_by_slug[p["slug"]] = set(cls.get("all_categories", []))
-            except Exception:
-                pass
-            run_step("topic_modeling",
-                     [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic] + tm_local, 3600)
-        elif is_update:
-            # Update mode normally runs --skip-classification (refresh coords +
-            # connections only, reuse the existing HDBSCAN bundle). But
-            # classify_papers.py hard-exits if `_hdbscan_model.joblib` is
-            # absent. On a topic that never had a full (non-skip) run the bundle
-            # doesn't exist yet, so a missing bundle must trigger a one-time
-            # FULL topic_modeling (no --skip-classification) to build it,
-            # rather than aborting the whole pipeline at a critical step.
-            bundle_path = os.path.join(str(get_topic_dir(topic)), "_hdbscan_model.joblib")
-            if not os.path.exists(bundle_path):
-                log("  [topic_modeling] HDBSCAN bundle missing — running full "
-                    "topic_modeling to build it (first run for this topic)")
-                run_step("topic_modeling",
-                         [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic] + tm_local, 3600)
-            else:
-                run_step("topic_modeling (coords+connections)",
-                         [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic, "--skip-classification"] + tm_local, 3600)
-        else:
-            run_step("topic_modeling",
-                     [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic] + tm_local, 3600)
-
-        # Step 3: classify (always — new papers only in update mode without --category)
-        run_step("classify_papers",
-                 [TOPIC_MODELING_PYTHON, "pipeline/classify_papers.py", "--topic", topic], 600)
-
-        # Step 4: Determine changed categories
-        changed_cats = []
-        if do_reclassify:
-            # Compare before/after classifications to find changed categories
-            try:
-                idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-                with open(idx_path, "r", encoding="utf-8") as f:
-                    idx = json.load(f)
-                cat_set = set()
-                for p in idx:
-                    if topic not in p.get("topics", []):
-                        continue
-                    slug = p["slug"]
-                    cls = p.get("classifications", {}).get(topic, {})
-                    new_cats = set(cls.get("all_categories", []))
-                    old_cats = old_cats_by_slug.get(slug, set())
-                    # Categories that gained or lost this paper
-                    diff = new_cats.symmetric_difference(old_cats)
-                    cat_set.update(diff)
-                    cat_set.update(new_cats)  # also include current cats of moved papers
-                changed_cats = sorted(cat_set) if cat_set else []
-                if changed_cats:
-                    log(f"  [changed_categories] {len(changed_cats)} categories changed after reclassification")
-                    for c in changed_cats:
-                        log(f"    - {c}")
-                else:
-                    log("  [changed_categories] No category changes detected — full regeneration")
-            except Exception as e:
-                log(f"  [changed_categories] ERROR comparing: {e} — full regeneration")
-                changed_cats = []
-        elif is_update and newly_completed:
-            try:
-                idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-                with open(idx_path, "r", encoding="utf-8") as f:
-                    idx = json.load(f)
-                cat_set = set()
-                for p in idx:
-                    if p.get("slug") in newly_completed:
-                        cls = p.get("classifications", {}).get(topic, {})
-                        for c in cls.get("all_categories", []):
-                            cat_set.add(c)
-                        pc = cls.get("primary_category", "")
-                        if pc:
-                            cat_set.add(pc)
-                changed_cats = sorted(cat_set)
-                log(f"  [changed_categories] {len(changed_cats)} categories affected by {len(newly_completed)} new papers")
-                for c in changed_cats:
-                    log(f"    - {c}")
-            except Exception as e:
-                log(f"  [changed_categories] ERROR reading index: {e}")
-                changed_cats = []
-
-        if missing_default_artifacts:
-            log("  [default_outputs] missing narrative/timeline artifacts — will ensure:")
-            for name in missing_default_artifacts[:12]:
-                log(f"    - {name}")
-            if len(missing_default_artifacts) > 12:
-                log(f"    ... +{len(missing_default_artifacts) - 12} more")
-
-        def run_default_topic_outputs(reason):
-            log(f"  [default_outputs] full narrative/timeline generation ({reason})")
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic], 21600)
-        # Step 5-6: summaries, insights, timelines — scoped by changed categories
-        if do_reclassify and changed_cats and missing_default_artifacts:
-            # If default outputs are absent, scoped timeline regeneration would
-            # still leave the main narrative/timeline incomplete. Build all.
-            run_default_topic_outputs("missing default outputs")
-        elif do_reclassify and changed_cats:
-            # --category: full reclassification → rebuild ALL summaries/insights (old cats must be purged)
-            # Only timelines are scoped to changed categories
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            cats_arg = ["--categories"] + changed_cats
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic] + cats_arg, 21600)
-        elif do_reclassify:
-            # --category but no diff detected: full regeneration
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic], 21600)
-        elif is_update:
-            if missing_default_artifacts and (do_ensure_timeline or do_timeline_images):
-                run_default_topic_outputs("missing default outputs")
-            elif changed_cats:
-                cats_arg = ["--categories"] + changed_cats
-                run_step("build_category_summaries",
-                         ["python", "pipeline/build_category_summaries.py", "--topic", topic] + cats_arg, 1200)
-                run_step("extract_insights",
-                         ["python", "pipeline/extract_insights.py", "--topic", topic] + cats_arg + insights_only_arg, 14400)
-
-                # Split by image presence:
-                #   - cats_with_image: narrative-only (unless --timeline explicitly requested)
-                #   - cats_missing_image: always full generation (new/renamed categories MUST get images)
-                cats_with_image, cats_missing_image = _split_cats_by_image_presence(topic, changed_cats)
-                if cats_missing_image:
-                    log(f"  [generate_timelines] {len(cats_missing_image)} categories missing timeline image — will generate:")
-                    for c in cats_missing_image:
-                        log(f"    - {c}")
-                if do_timeline_images:
-                    # --timeline: full generation for all changed cats
-                    run_step("generate_timelines",
-                             ["python", "pipeline/generate_timelines.py", "--topic", topic] + cats_arg, 21600)
-                else:
-                    # Auto: narrative-only for cats with existing images
-                    if cats_with_image:
-                        run_step("generate_timelines (narrative)",
-                                 ["python", "pipeline/generate_timelines.py", "--topic", topic,
-                                  "--categories"] + cats_with_image + ["--narrative-only"], 21600)
-                    # Auto: full generation for new/renamed cats without images
-                    if cats_missing_image:
-                        run_step("generate_timelines (images)",
-                                 ["python", "pipeline/generate_timelines.py", "--topic", topic,
-                                  "--categories"] + cats_missing_image, 21600)
-            elif do_timeline_images:
-                run_default_topic_outputs("--timeline requested")
-            else:
-                log("  [summaries/insights/timelines] SKIP (no new papers classified)")
-        elif do_timeline_images:
-            # --timeline alone (no --resume): full regeneration of all narratives + images
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic], 21600)
-        else:
-            # Full mode (no --resume, no --timeline)
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic], 21600)
-
-        # Step 7-10: Always run (fast steps)
-        run_step("inject_frontmatter",
-                 ["python", "pipeline/inject_frontmatter.py", "--topic", topic], 600)
-        run_step("generate_moc",
-                 ["python", "pipeline/generate_moc.py", "--topic", topic], 600)
-        # 네트워크 시각화는 Research Insights 와 묶인 Option(O-2) — --insights 일 때만.
-        # (LLM 호출은 없지만 기능 분류상 인사이트 분석 부가물로 함께 게이트)
-        if args.insights:
-            run_step("generate_network",
-                     ["python", "pipeline/generate_network.py", "--topic", topic], 600)
-        else:
-            log("  [generate_network] SKIP (Option O-2 — --insights 일 때만 재생성)")
-
-        # Verify UMAP coordinate coverage before deploy
         try:
-            topic_dir = str(get_topic_dir(topic))
-            umap_path = os.path.join(topic_dir, "_umap_coords.json")
-            idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-            with open(idx_path, "r", encoding="utf-8") as f:
-                all_idx = json.load(f)
-            topic_slugs = {p["slug"] for p in all_idx if topic in p.get("topics", [])}
-            umap_slugs = set()
-            if os.path.exists(umap_path):
-                with open(umap_path, "r", encoding="utf-8") as f:
-                    umap_slugs = set(json.load(f).keys())
-            missing = topic_slugs - umap_slugs
-            if missing:
-                log(f"\n  [verify_umap] {len(missing)} papers missing UMAP coordinates — re-running topic_modeling...")
-                run_step("topic_modeling (umap fix)",
-                         [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic, "--skip-connections"], 3600)
-                if args.insights:   # 네트워크는 Option(O-2) — --insights 일 때만
-                    run_step("generate_network (rebuild)",
-                             ["python", "pipeline/generate_network.py", "--topic", topic], 600)
-            else:
-                log(f"  [verify_umap] OK: all {len(topic_slugs)} papers have coordinates")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            log(f"  [verify_umap] WARNING: verification failed ({str(e)[:100]})")
+            _ = execute_plan(
+                tuple(runnable),
+                topic=topic,
+                policy=runtime_policy,
+                state_root=safe_state_root,
+                workspace_root=PROJECT_ROOT,
+                runner=run_safe_stage,
+                resume=resuming_safe_run,
+                lease=safe_run_lease,
+            )
+        except Exception as error:
+            log(f"SAFE POST-PROCESSING FAILED: {error}")
+            return 2
 
-        run_step("review_to_html",
-                 ["python", "pipeline/review_to_html.py", "--all"], 600)
-        run_step("build_topic_index",
-                 ["python", "pipeline/build_topic_index.py", topic], 600)
-
-        # Atom 피드(feed.xml) — build_topic_index 가 심은 autodiscovery <link> 의 대상.
-        run_step("build_rss",
-                 ["python", "pipeline/build_rss.py", topic], 300)
-
-        # Cleanup stale category narratives/timelines before building the
-        # search index so Deep Research never surfaces renamed categories.
-        # Always runs --execute because post-processing has just rewritten
-        # the classifier output; any orphan entries are safe to remove.
-        run_step("cleanup",
-                 ["python", "pipeline/cleanup.py", "--execute"], 300)
-
-        log("  [build_search_index] SKIP: local BM25 replacement is handled by Todo 16")
-
-        # `_cross` is a cheap merge of existing topic sidecars (no embedding
-        # calls). Keep the agent/CLI default collection synchronized after every
-        # source-topic rebuild; the generic page itself need not be regenerated.
-        run_step("build_cross_index",
-                 ["python", "pipeline/build_cross_index.py", "--no-page"], 300)
-
-        # Fixed query vectors make this a deterministic, network-free deploy
-        # gate. A source collection and the merged agent collection must both
-        # retain the tracked recall floor and baseline before publication.
-        eval_dir = PIPELINE_DIR / "eval"
-        eval_results = eval_dir / "results"
-        eval_common = [
-            "python", "pipeline/evaluate_retrieval.py",
-            "--queries", str(eval_dir / "retrieval_queries.jsonl"),
-            "--vectors", str(eval_dir / "retrieval_query_vectors.json"),
-            "--baseline", str(eval_dir / "retrieval_baseline.json"),
-            "--strict",
-            "--min-recall-at-5", "0",
-            "--max-regression", "0.025",
+        geometry_paths = [
+            path.relative_to(PROJECT_ROOT).as_posix()
+            for path in Path(PAPERS_DIR).glob("*/figures/manifest-v1.json")
+            if path.is_file()
         ]
-        run_step("evaluate_retrieval",
-                 eval_common + ["--topic", topic,
-                                "--output", str(eval_results / f"{topic}.json"),
-                                "--failures", str(eval_results / f"{topic}_failures.json")],
-                 300)
-        run_step("evaluate_retrieval (_cross)",
-                 eval_common + ["--topic", "_cross",
-                                "--output", str(eval_results / "_cross.json"),
-                                "--failures", str(eval_results / "_cross_failures.json")],
-                 300)
-        run_step(
-            "refresh_retrieval_eval_snapshot",
-            ["python", "pipeline/refresh_retrieval_eval_snapshot.py", "--if-installed"],
-            900,
+        _ = artifact_manifest(
+            topic,
+            runtime_policy,
+            PROJECT_ROOT,
+            geometry_paths=geometry_paths,
         )
-
         log("\n  [prepare_deploy] SKIP: deployment is outside the local-safe profile")
-
         log("\nPost-processing complete!")
+
+    return 0
 
 
 if __name__ == "__main__":
