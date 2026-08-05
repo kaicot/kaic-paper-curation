@@ -673,7 +673,7 @@ def convert_review(md_path, topic, slug_dir):
         '<div class="ai-notice" style="margin:0.6rem 0;padding:0.55rem 0.85rem;'
         'background:#fff8e1;border:1px solid #ffe0a3;border-radius:8px;'
         'font-size:0.82rem;color:#7a5b00;line-height:1.55;">'
-        '&#9888;&#65039; 이 페이지의 요약&middot;평가&middot;해설은 <strong>생성형 AI(Claude)</strong>가 '
+        '&#9888;&#65039; 이 페이지의 요약&middot;평가&middot;해설은 <strong>saved-auth Codex</strong>가 '
         '자동 생성한 2차적 분석물입니다. 논문 원문의 저작권은 <strong>원저작자</strong>에게 있으며, '
         '정확한 내용은 원문(위 DOI&middot;arXiv 등 출처)을 확인하세요.</div>')
     body_parts.append(

@@ -3,14 +3,14 @@ Paper-Curation --local --update-force 배치 실행 스크립트.
 
 사용법:
   PYTHONUTF8=1 python run_update_force.py --topic ai4s
-  # --concurrency 기본값 16 (Anthropic Tier 4). Tier 1~3 은 4~12 로 낮춤.
+  # --concurrency 기본값 16.
 
 기능:
   1. Zotero 컬렉션에서 전체 논문 fetch
   2. 기존 review.md, text.md, figures/ 삭제
   3. PDF 파싱 → text.md
-  4. Figure 추출 + Gemini Flash 검증 (5라운드, 감쇠)
-  5. review.md 작성 (Claude Haiku)
+  4. Figure 추출 + 결정론적 geometric 검증
+  5. review.md 작성 (saved-auth Codex)
   6. index.html 변환 (review_to_html.py)
   7. 진행 상황을 checkpoint.json에 저장 (중단 후 재개 가능)
 
@@ -24,19 +24,50 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
+from typing import Any, cast
 
-# Paths
-from config_loader import (
-    PAPERS_DIR as _PAPERS_DIR, PIPELINE_DIR, _ssl_ctx,
-    get_zotero_api_key, get_zotero_user_id, get_collection_key, get_collections, get_zotero_dir,
-    get_topic_dir, get_google_key,
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from pipeline.config_loader import (  # noqa: E402
+    PAPERS_DIR as _PAPERS_DIR,
+    PIPELINE_DIR,
+    _ssl_ctx,
+    get_collection_key,
+    get_collections,
+    get_topic_dir,
+    get_zotero_api_key,
+    get_zotero_dir,
+    get_zotero_user_id,
+    load_config,
 )
-from lib.categories import category_slug
+from pipeline.lib.categories import category_slug  # noqa: E402
+from pipeline.lib.generation_cache import (  # noqa: E402
+    CacheFailure,
+    CacheIdentity,
+    CacheSuccess,
+    GenerationCache,
+    GenerationCacheError,
+)
+from pipeline.providers.codex_gateway import CodexGateway, CodexGatewayError  # noqa: E402
+from pipeline.runtime_policy import (  # noqa: E402
+    RuntimePolicy,
+    RuntimePolicyError,
+    resolve_runtime_policy,
+)
+from pipeline.schemas.codex_schema import (  # noqa: E402
+    JsonObject,
+    SchemaError,
+    validate_json,
+)
 PAPERS_DIR = str(_PAPERS_DIR)
 PROJECT_ROOT = PIPELINE_DIR.parent
 
@@ -247,19 +278,32 @@ def _resolve_topic_modeling_python():
     )
 
 
-TOPIC_MODELING_PYTHON = _resolve_topic_modeling_python()
-if TOPIC_MODELING_PYTHON != sys.executable:
-    print(f"[env] UMAP/HDBSCAN 단계 인터프리터: {TOPIC_MODELING_PYTHON} "
-          f"(현재 env 가 py312 가 아니거나 프로브 실패 → py312 라우팅; 사유는 _state/env_probe.json)")
-
-ZOTERO_DIR = get_zotero_dir()
-
-API_KEY = get_zotero_api_key()
-USER_ID = get_zotero_user_id()
-COLLECTIONS = get_collections()
+TOPIC_MODELING_PYTHON = sys.executable
+ZOTERO_DIR = ""
+API_KEY = ""
+USER_ID = ""
+COLLECTIONS: dict[str, str] = {}
 
 # Checkpoint
 CHECKPOINT_FILE = str(PIPELINE_DIR / "_update_force_checkpoint.json")
+
+
+def _initialize_runtime(cli_mode: str | None) -> RuntimePolicy:
+    """Resolve policy before credentials, probes, writes, or worker startup."""
+    global API_KEY, COLLECTIONS, TOPIC_MODELING_PYTHON, USER_ID, ZOTERO_DIR
+    policy = resolve_runtime_policy(cast(JsonObject, load_config()), cli_mode)
+    TOPIC_MODELING_PYTHON = _resolve_topic_modeling_python()
+    if TOPIC_MODELING_PYTHON != sys.executable:
+        print(
+            f"[env] UMAP/HDBSCAN 단계 인터프리터: {TOPIC_MODELING_PYTHON} "
+            "(현재 env 가 py312 가 아니거나 프로브 실패 → py312 라우팅; "
+            "사유는 _state/env_probe.json)"
+        )
+    ZOTERO_DIR = get_zotero_dir()
+    API_KEY = get_zotero_api_key()
+    USER_ID = get_zotero_user_id()
+    COLLECTIONS = get_collections()
+    return policy
 
 
 def log(msg):
@@ -670,16 +714,16 @@ def extract_text(pdf_path, slug_dir):
     return False
 
 
-# ── Phase 3: Extract figures + Gemini validation ──
+# ── Phase 3: Extract figures + local geometric validation ──
 
 # Figure crop is LOCALIZED FROM THE PDF'S OWN GEOMETRY before any LLM call.
-# The previous design seeded every crop as the full page and relied on Gemini
-# point-offsets to shrink it; a Gemini failure or an "ok" on round 0 left the
+# The previous design seeded every crop as the full page and relied on a remote
+# validator to shrink it; a validator failure or an "ok" on round 0 left the
 # ENTIRE PAGE as the figure. We now build the crop box from the union of the
 # graphic rects (raster image blocks + get_image_rects + area-filtered
 # get_drawings) that are adjacent to the caption, render THAT box first, and
-# only then optionally let Gemini nudge it within bounds. Gemini can never
-# enlarge the box back to a full page, and a Gemini error keeps the geometric
+# and keeps all later refinement within those bounds. Refinement can never
+# enlarge the box back to a full page, and an unavailable validator keeps the geometric
 # box instead of falsely accepting "ok".
 
 
@@ -769,62 +813,7 @@ def extract_figures(pdf_path, slug_dir):
 
     doc = fitz.open(pdf_path)
     MARGIN = 30
-    MAX_ROUNDS = 2  # geometric box is the prior; Gemini only refines
-
-    # Phase 4 B2: cheap pre-validator runs first. When the heuristic is
-    # confident the figure is invalid (tiny/blank/near-uniform), we skip
-    # the Gemini round trip entirely. Empirically saves ~30% of calls.
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from api.extract import pre_validate_figure
-
-    # 키 해석: env(GOOGLE_API_KEY/GEMINI_API_KEY) → config.json. 단 reextract_figures
-    # 가 geometric-only 강제 시 세팅하는 PAPER_CURATION_NO_GEMINI 가 있으면 키 유무와
-    # 무관하게 Gemini 검증을 끈다 (env pop 만으론 config.json 키가 남아 스위치가 안 먹음).
-    have_gemini = (not os.environ.get("PAPER_CURATION_NO_GEMINI")
-                   and bool(get_google_key().strip()))
-    # Log a degraded-Gemini warning at most once per run instead of silently
-    # accepting full pages when the validator throws.
-    _gemini_warned = {"done": False}
-
-    def validate(img_path, caption):
-        """Return a verdict dict. status ∈ {ok, clipped, oversized, both, error}.
-
-        'error' (validator unavailable) is DISTINCT from 'ok' (figure looks
-        good): the caller keeps the geometric box on 'error' rather than
-        treating it as accepted.
-        """
-        pre = pre_validate_figure(img_path)
-        if pre is not None:
-            return pre
-        if not have_gemini:
-            # No key → skip the round-trip entirely, rely on geometry.
-            return {"status": "error", "adjust_pt": {}}
-        try:
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=get_google_key())
-            with open(img_path, "rb") as f:
-                img_bytes = f.read()
-            prompt = (f"Evaluate cropping of this academic figure.\nCaption: {caption}\n"
-                      f"Check: (1) content CLIPPED at edges? (2) EXCESS body text?\n"
-                      f"JSON only: {{\"status\":\"ok\"|\"clipped\"|\"oversized\"|\"both\","
-                      f"\"issues\":\"brief\",\"adjust_pt\":{{\"top\":0,\"bottom\":0,\"left\":0,\"right\":0}}}}\n"
-                      f"adjust_pt: positive=expand, negative=shrink. PDF points.")
-            resp = client.models.generate_content(
-                model="gemini-3.1-pro-preview",
-                contents=[types.Part.from_bytes(data=img_bytes, mime_type="image/png"), prompt])
-            text = resp.text.strip()
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            return json.loads(text)
-        except Exception as e:
-            if not _gemini_warned["done"]:
-                log(f"  WARN Gemini figure validator unavailable "
-                    f"({type(e).__name__}); using geometric crops only")
-                _gemini_warned["done"] = True
-            return {"status": "error", "adjust_pt": {}}
+    MAX_ROUNDS = 0
 
     # Collect caption candidates across all pages first, so we can dedup a
     # fig_num globally by ADJACENT-GRAPHIC AREA (prefer the real caption over a
@@ -993,8 +982,8 @@ def extract_figures(pdf_path, slug_dir):
 
         # Clamp bounds = the geometric box itself (owned-rect hull + MARGIN,
         # already extended toward the caption to capture text-rendered figure
-        # content). Gemini may nudge WITHIN this box but never expand past it —
-        # the geometric crop is the prior; the LLM only refines inside it, so it
+        # content). Any local refinement stays within this box —
+        # the geometric crop is the prior, so later processing
         # can neither escape to a full page nor re-clip the caption extension.
         hx0, hy0, hx1, hy1 = c["box"]
 
@@ -1021,7 +1010,7 @@ def extract_figures(pdf_path, slug_dir):
             if rnd == MAX_ROUNDS:
                 break
 
-            result = validate(out, caption)
+            result: dict[str, Any] = {"status": "error", "adjust_pt": {}}
             status = result.get("status")
             if status == "ok":
                 break
@@ -1066,7 +1055,7 @@ def extract_figures(pdf_path, slug_dir):
         figures.append({"name": str(fig_num), "page": pn, "caption": caption})
 
     # ── 등록 시 '모든 그림' 보장 (채팅 인라인 그림 완전성) ──────────────
-    # (a) 6번 이후 그림: geometric-only 저장 (Gemini 라운드 없음 — 비용 억제).
+    # (a) 6번 이후 그림: geometric-only 저장.
     #     review 반환(figures)에는 넣지 않아 기존 임베드 동작 불변.
     for c in extras:
         out = os.path.join(fig_dir, f"fig{c['fig_num']}.png")
@@ -1190,60 +1179,20 @@ REVIEW_TEMPLATE = """# {title}
 """
 
 
-REVIEW_TOOL_SCHEMA = {
-    "name": "emit_review",
-    "description": (
-        "Emit the structured Korean review for the given paper. All "
-        "narrative fields must be in Korean except for jargon "
-        "(technical terms, model names, datasets, algorithms, formulas, "
-        "framework/product names) which must stay in the original form."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "essence":         {"type": "string", "minLength": 20,
-                                "description": "핵심 요약 1-2문장."},
-            "fig_essence":     {"type": "integer", "minimum": 0, "maximum": 20,
-                                "description": "Essence에 가장 관련된 Figure 번호. 없으면 0."},
-            "known":           {"type": "string", "minLength": 10,
-                                "description": "알려진 것 1-2문장."},
-            "gap":             {"type": "string", "minLength": 10,
-                                "description": "연구 갭 1-2문장."},
-            "why":             {"type": "string", "minLength": 10,
-                                "description": "왜 중요한지 1-2문장."},
-            "approach":        {"type": "string", "minLength": 10,
-                                "description": "접근법 1-2문장."},
-            "achievement":     {"type": "string", "minLength": 20,
-                                "description": "성과 (마크다운 번호 목록, 각 항목 **굵은 제목**: 설명)."},
-            "fig_achievement": {"type": "integer", "minimum": 0, "maximum": 20},
-            "how":             {"type": "string", "minLength": 10,
-                                "description": "방법론 (마크다운 bullet 목록)."},
-            "fig_how":         {"type": "integer", "minimum": 0, "maximum": 20},
-            "originality":     {"type": "string", "minLength": 10,
-                                "description": "독창성 (마크다운 bullet 목록)."},
-            "limitation":      {"type": "string", "minLength": 10,
-                                "description": "한계 + 후속연구 (마크다운 bullet 목록)."},
-            "novelty":         {"type": "integer", "minimum": 1, "maximum": 5},
-            "technical":       {"type": "integer", "minimum": 1, "maximum": 5,
-                                "description": "Technical soundness."},
-            "significance":    {"type": "integer", "minimum": 1, "maximum": 5},
-            "clarity":         {"type": "integer", "minimum": 1, "maximum": 5},
-            "overall":         {"type": "integer", "minimum": 1, "maximum": 5},
-            "verdict":         {"type": "string", "minLength": 10,
-                                "description": "총평 1-2문장."},
-        },
-        "required": ["essence", "fig_essence", "known", "gap", "why", "approach",
-                     "achievement", "fig_achievement", "how", "fig_how",
-                     "originality", "limitation",
-                     "novelty", "technical", "significance", "clarity", "overall",
-                     "verdict"],
-    },
-}
+REVIEW_SCHEMA_PATH = PIPELINE_DIR / "schemas" / "review-v1.json"
+REVIEW_SCHEMA_VERSION = "review-v1"
+REVIEW_PROMPT_VERSION = "review-prompt-v1"
 
-WRITE_REVIEW_SCHEMA_VERSION = "v1"
-# 기존 review.md 는 재생성하지 않으므로 모델 변경은 신규 리뷰부터 적용된다
-# (캐시 키에 model 포함 — 변경 시 기존 캐시는 자연 무효).
-WRITE_REVIEW_MODEL = os.environ.get("WRITE_REVIEW_MODEL", "claude-sonnet-5")
+
+def _load_review_schema() -> JsonObject:
+    with REVIEW_SCHEMA_PATH.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError("review-v1 schema must be an object")
+    return value
+
+
+REVIEW_SCHEMA = _load_review_schema()
 
 
 _REVIEW_STR_TAGS = ("essence", "known", "gap", "why", "approach", "achievement",
@@ -1322,13 +1271,67 @@ def _salvage_review_data(data):
     return fixed
 
 
-def write_review(item, slug_dir, figures):
+class ReviewValidationError(ValueError):
+    """A structured review violated deterministic host-side invariants."""
+
+
+def _validate_review_data(data: JsonObject) -> JsonObject:
+    validate_json(data, REVIEW_SCHEMA)
+    required = REVIEW_SCHEMA.get("required")
+    if not isinstance(required, list) or set(data) != set(required):
+        raise ReviewValidationError("review fields must exactly match review-v1")
+    for name in _REVIEW_STR_TAGS:
+        value = data.get(name)
+        if not isinstance(value, str) or re.search(r"[가-힣]", value) is None:
+            raise ReviewValidationError(f"{name} must contain Korean narrative")
+        if re.search(r"</?(?:parameter|invoke|[a-z_]+)>", value, re.I):
+            raise ReviewValidationError(f"{name} contains leaked tool tags")
+        if re.search(r"(?m)^##\s+", value):
+            raise ReviewValidationError(f"{name} contains a top-level heading")
+    for name in ("fig_essence", "fig_achievement", "fig_how"):
+        value = data.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 20:
+            raise ReviewValidationError(f"{name} must be an integer from 0 to 20")
+    for name in ("novelty", "technical", "significance", "clarity", "overall"):
+        value = data.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5:
+            raise ReviewValidationError(f"{name} must be an integer from 1 to 5")
+    return data
+
+
+def _atomic_publish_review(path: Path, content: str) -> None:
+    descriptor, raw_temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            _ = handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_review(
+    item,
+    slug_dir,
+    figures,
+    *,
+    runtime_policy: RuntimePolicy | None = None,
+    gateway: Any | None = None,
+    cache: GenerationCache | None = None,
+    identity: CacheIdentity | None = None,
+):
     text_path = os.path.join(slug_dir, "text.md")
     if not os.path.exists(text_path):
         return False
 
-    with open(text_path, "r", encoding="utf-8") as f:
-        paper_text = f.read()[:15000]
+    source_bytes = Path(text_path).read_bytes()
+    paper_text = source_bytes.decode("utf-8")[:15000]
 
     title = item.get("title", "")
     authors = ", ".join(
@@ -1344,15 +1347,8 @@ def write_review(item, slug_dir, figures):
         fig_refs += f"\n- Fig {fig['name']}: {fig['caption'][:80]}"
 
     try:
-        from anthropic import Anthropic
-        client = Anthropic(timeout=180.0, max_retries=4)
-
-        # Tool-use forces a structured JSON response that matches
-        # REVIEW_TOOL_SCHEMA. The SDK auto-retries on schema validation
-        # failures so we no longer need post-hoc list-literal / figure
-        # path / evaluation fixers.
         prompt = (
-            "논문을 분석하고 `emit_review` 도구를 호출해 리뷰 필드를 채워라.\n\n"
+            "논문을 분석하고 제공된 JSON Schema와 정확히 일치하는 JSON 리뷰를 반환하라.\n\n"
             "모든 narrative 필드는 한국어 서술. 단 Jargon — 기술 용어·모델명·데이터셋·"
             "알고리즘·수식·프레임워크·제품명 등 — 은 원문 그대로 유지하고 번역하지 "
             "말 것. 예: \"diffusion model을 사용한다\" (O), "
@@ -1362,35 +1358,40 @@ def write_review(item, slug_dir, figures):
             f"본문 (발췌): {paper_text[:12000]}\n"
             f"Figure 목록:{fig_refs}\n"
         )
-
-        # cached_call: same (slug + prompt + model + schema_version) → cache
-        # hit, no Anthropic call. Re-runs of --mode rebuild on unchanged
-        # papers cost zero LLM calls.
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from api._llm import cached_call, paper_cache_dir
         slug = os.path.basename(slug_dir.rstrip("/\\"))
-        cache_dir = paper_cache_dir(slug)
-
-        def _make_call():
-            response = client.messages.create(
-                model=WRITE_REVIEW_MODEL,
-                max_tokens=4000,
-                tools=[REVIEW_TOOL_SCHEMA],
-                tool_choice={"type": "tool", "name": "emit_review"},
-                messages=[{"role": "user", "content": prompt}],
+        if identity is None:
+            policy = runtime_policy or resolve_runtime_policy(
+                cast(JsonObject, load_config())
             )
-            for block in response.content:
-                # SDK returns ToolUseBlock; check by attribute presence.
-                if getattr(block, "type", None) == "tool_use" \
-                        and getattr(block, "name", None) == "emit_review":
-                    return dict(block.input)
-            raise RuntimeError("emit_review tool was not invoked")
+            if policy.mode != "codex":
+                raise GenerationCacheError("policy-denied", "review generation requires codex mode")
+            if gateway is None:
+                gateway = CodexGateway.production(PROJECT_ROOT)
+            identity = CacheIdentity.from_gateway(
+                runtime_policy=policy,
+                gateway=gateway,
+                role="long_form",
+                prompt_version=REVIEW_PROMPT_VERSION,
+                prompt=prompt,
+                schema_version=REVIEW_SCHEMA_VERSION,
+                schema=REVIEW_SCHEMA,
+                source=source_bytes,
+                task_id=f"review:{slug}",
+            )
+        if gateway is None:
+            gateway = CodexGateway.production(PROJECT_ROOT)
+        generation_cache = cache or GenerationCache(Path(slug_dir) / ".llm_cache")
 
-        data = cached_call(
-            cache_dir, prompt, WRITE_REVIEW_MODEL, _make_call,
-            schema_version=WRITE_REVIEW_SCHEMA_VERSION,
+        def _generate():
+            try:
+                result = gateway.generate_json("long_form", prompt, REVIEW_SCHEMA)
+                return CacheSuccess(_validate_review_data(result))
+            except (CodexGatewayError, ReviewValidationError, SchemaError, TypeError, ValueError):
+                return CacheFailure("failed")
+
+        data = _validate_review_data(
+            generation_cache.get_or_generate(identity, _generate)
         )
-        data = _salvage_review_data(data)
 
         # Build figure insertions
         def fig_block(fig_num_str):
@@ -1443,9 +1444,8 @@ def write_review(item, slug_dir, figures):
             verdict=data.get("verdict", ""),
         )
 
-        review_path = os.path.join(slug_dir, "review.md")
-        with open(review_path, "w", encoding="utf-8") as f:
-            f.write(review_text.strip() + "\n")
+        review_path = Path(slug_dir) / "review.md"
+        _atomic_publish_review(review_path, review_text.strip() + "\n")
         return True
 
     except Exception as e:
@@ -1756,7 +1756,7 @@ def paper_has_other_topics(slug):
 MAX_RETRIES = 3
 
 
-def _do_process(item, slug, slug_dir, pdf_path):
+def _do_process(item, slug, slug_dir, pdf_path, runtime_policy=None):
     """Single attempt: text.md → figures → review.md → index.html.
     Returns (status, reason) — status is 'ok' or 'fail'."""
 
@@ -1780,7 +1780,13 @@ def _do_process(item, slug, slug_dir, pdf_path):
 
     # Write review
     log(f"  {slug}: writing review...")
-    write_review(item, slug_dir, figures)
+    if not write_review(
+        item,
+        slug_dir,
+        figures,
+        runtime_policy=runtime_policy,
+    ):
+        return "fail", "review_write_failed"
     review_path = os.path.join(slug_dir, "review.md")
     if not os.path.exists(review_path) or os.path.getsize(review_path) < 200:
         return "fail", "review_write_failed"
@@ -1799,7 +1805,7 @@ def _do_process(item, slug, slug_dir, pdf_path):
     return "ok", ""
 
 
-def process_paper(item, slug, cp):
+def process_paper(item, slug, cp, runtime_policy=None):
     """Process a single paper with up to MAX_RETRIES auto-retries on failure."""
     if slug in cp["completed"]:
         return "skipped"
@@ -1811,7 +1817,7 @@ def process_paper(item, slug, cp):
     if paper_has_other_topics(slug):
         log(f"  {slug}: belongs to multiple topics, skipping file deletion")
     else:
-        for fname in ["review.md", "index.html", "text.md"]:
+        for fname in ["text.md"]:
             fpath = os.path.join(slug_dir, fname)
             if os.path.exists(fpath):
                 os.remove(fpath)
@@ -1838,7 +1844,13 @@ def process_paper(item, slug, cp):
     # Try up to MAX_RETRIES times
     last_reason = ""
     for attempt in range(1, MAX_RETRIES + 1):
-        status, reason = _do_process(item, slug, slug_dir, pdf_path)
+        status, reason = _do_process(
+            item,
+            slug,
+            slug_dir,
+            pdf_path,
+            runtime_policy,
+        )
         if status == "ok":
             with _cp_lock:
                 cp["completed"].append(slug)
@@ -1945,6 +1957,7 @@ def _run_curate(topic, *, mode=None, concurrency=16, resume=False,
 def main():
     parser = argparse.ArgumentParser(description="Paper-curation --update-force batch")
     parser.add_argument("--topic", default="ai4s", help="Topic: ai4s or scisci")
+    parser.add_argument("--llm-mode", default=None)
     parser.add_argument("--concurrency", type=int, default=16, help="Parallel workers (Tier 4 default; lower for Tier 1~3 — see README)")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--skip-existing", action="store_true",
@@ -1976,7 +1989,7 @@ def main():
                              "기본은 paper connections(Core, '같이 보면 좋은 논문')만 생성 (--only connections).")
     parser.add_argument("--local-fallback", action="store_true",
                         help="topic_modeling 연결 단계에서 max retry round 를 다 돌고도 막힌 "
-                             "papers 를 로컬 OpenAI 호환 모델(Ollama/LM Studio 등)로 마저 연결. "
+                             "papers 를 로컬 호환 모델로 마저 연결. "
                              "config.json 의 local_model 또는 LOCAL_MODEL_BASE_URL/NAME 필요.")
     parser.add_argument("--no-deploy", action="store_true",
                         help="end-of-run prepare_deploy(wrangler deploy + gh-pages + master push)를 건너뛴다. "
@@ -1998,6 +2011,11 @@ def main():
                              "retime=regenerate timeline narratives+images only. "
                              "When set, overrides --resume/--skip-existing/--timeline/--category combinations.")
     args = parser.parse_args()
+    try:
+        runtime_policy = _initialize_runtime(args.llm_mode)
+    except RuntimePolicyError as error:
+        print(f"Runtime policy denied: {error.code}", file=sys.stderr)
+        return 2
 
     # Apply --mode → legacy flags mapping. Pure translation; no behavior change
     # when --mode is absent (args.mode is None → all legacy flags honored as-is).
@@ -2185,7 +2203,13 @@ def main():
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
         futures = {}
         for item, slug in remaining:
-            future = executor.submit(process_paper, item, slug, cp)
+            future = executor.submit(
+                process_paper,
+                item,
+                slug,
+                cp,
+                runtime_policy,
+            )
             futures[future] = slug
 
         for future in as_completed(futures):
@@ -2619,8 +2643,6 @@ def main():
         run_step("build_rss",
                  ["python", "pipeline/build_rss.py", topic], 300)
 
-        # Deep Research search index (section-aware chunks + Gemini embeddings).
-        # Reads GOOGLE_API_KEY/GEMINI_API_KEY from env or config.json.
         # Cleanup stale category narratives/timelines before building the
         # search index so Deep Research never surfaces renamed categories.
         # Always runs --execute because post-processing has just rewritten
@@ -2628,8 +2650,7 @@ def main():
         run_step("cleanup",
                  ["python", "pipeline/cleanup.py", "--execute"], 300)
 
-        run_step("build_search_index",
-                 ["python", "pipeline/build_search_index.py", "--topic", topic], 900)
+        log("  [build_search_index] SKIP: local BM25 replacement is handled by Todo 16")
 
         # `_cross` is a cheap merge of existing topic sidecars (no embedding
         # calls). Keep the agent/CLI default collection synchronized after every
@@ -2667,51 +2688,12 @@ def main():
             900,
         )
 
-        # Deploy via wrangler (Cloudflare Workers with Static Assets) +
-        # idempotent gh-pages stub sync. Requires:
-        #   CLOUDFLARE_API_TOKEN (or CF_API_TOKEN), CLOUDFLARE_ACCOUNT_ID.
-        has_cf_token = bool(
-            os.environ.get("CLOUDFLARE_API_TOKEN") or os.environ.get("CF_API_TOKEN")
-        )
-        has_account_id = bool(os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
-        no_deploy = (getattr(args, "no_deploy", False)
-                     or bool(os.environ.get("PAPER_CURATION_NO_DEPLOY")))
-        if no_deploy:
-            log("\n  [prepare_deploy] SKIP: deploy suppressed "
-                "(--no-deploy / PAPER_CURATION_NO_DEPLOY)")
-        elif has_cf_token and has_account_id:
-            log("\n  [prepare_deploy] Cloudflare env vars found, deploying...")
-            try:
-                result = subprocess.run(
-                    ["python", "pipeline/prepare_deploy.py", "--topic", topic, "--push"],
-                    cwd=str(PIPELINE_DIR.parent),
-                    capture_output=True, text=True, timeout=1800,
-                    env={**os.environ, "PYTHONUTF8": "1"},
-                )
-                if result.returncode == 0:
-                    log(f"  [prepare_deploy] OK: wrangler deploy + gh-pages sync done")
-                else:
-                    log(f"  [prepare_deploy] FAILED (exit {result.returncode})")
-                    if result.stderr:
-                        log(f"    {result.stderr[:500]}")
-                    raise RuntimeError(
-                        f"prepare_deploy failed with exit {result.returncode}"
-                    )
-            except Exception as e:
-                log(f"  [prepare_deploy] ERROR: {str(e)[:100]}")
-                raise
-        else:
-            missing = []
-            if not has_cf_token:
-                missing.append("CLOUDFLARE_API_TOKEN (or CF_API_TOKEN)")
-            if not has_account_id:
-                missing.append("CLOUDFLARE_ACCOUNT_ID")
-            log(f"\n  [prepare_deploy] SKIP: missing env vars — {', '.join(missing)}")
+        log("\n  [prepare_deploy] SKIP: deployment is outside the local-safe profile")
 
         log("\nPost-processing complete!")
 
 
 if __name__ == "__main__":
-    from _env_guard import force_py312
+    from pipeline._env_guard import force_py312
     force_py312()
-    main()
+    raise SystemExit(main())

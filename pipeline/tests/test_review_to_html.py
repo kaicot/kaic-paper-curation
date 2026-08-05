@@ -13,9 +13,10 @@ Pure function — no file IO, no rendering. Run:
 
 import os
 import sys
+import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-import review_to_html as R  # noqa: E402
+from pipeline import review_to_html as R  # noqa: E402
 
 ALL = sorted([
     "120_A", "1200_B", "590_Open", "900_C", "793_X", "1065_Y", "1124_Z",
@@ -120,5 +121,10 @@ def main():
     print("RESULT: ALL PASS")
 
 
+class ReviewToHtmlContractTests(unittest.TestCase):
+    def test_existing_target_resolution_contract(self):
+        main()
+
+
 if __name__ == "__main__":
-    main()
+    _ = unittest.main()
