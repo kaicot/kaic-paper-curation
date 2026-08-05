@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "package_json": "pipeline/provider-scanner.package.json",
+  "package_lock": "pipeline/provider-scanner.package-lock.json",
+  "parser": "pipeline/tools/parse_provider_javascript.mjs",
+  "acorn": {
+    "name": "acorn",
+    "version": "8.15.0",
+    "tarball": "https://registry.npmjs.org/acorn/-/acorn-8.15.0.tgz",
+    "integrity": "sha512-NZyJarBfL7nWwIq+FDL6Zp/yHEhePMNnnJ0y3qfieCrmNvYct8uvtiV41UvlSe6apAfk0fY1FbWx+NwfmpvtTg==",
+    "entrypoint": "node_modules/acorn/dist/acorn.mjs"
+  }
+}
