@@ -82,7 +82,7 @@ class LocalAnswerHTTPServer(ThreadingHTTPServer):
 
 
 class LocalHandler(SimpleHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+    protocol_version: str = "HTTP/1.1"
 
     @property
     def local_server(self) -> LocalAnswerHTTPServer:
@@ -121,7 +121,7 @@ class LocalHandler(SimpleHTTPRequestHandler):
     def handle_expect_100(self) -> bool:
         preflight = self._preflight()
         if preflight is not None:
-            self.close_connection = True
+            self.close_connection: bool = True
             self._send_error(*preflight)
             return False
         self.send_response_only(100)
