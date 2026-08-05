@@ -114,7 +114,7 @@ class SafeUpdateOrchestrationTests(unittest.TestCase):
                 str(recovered["run_id"]).startswith("recovery-")
             )
 
-    def test_transitional_bm25_sidecar_is_sparse_and_non_destructive(self) -> None:
+    def test_active_bm25_v2_is_sparse_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sparse-sidecar-") as directory:
             workspace = Path(directory)
             paper_index = workspace / "docs/papers/_papers_index.json"
@@ -139,6 +139,14 @@ class SafeUpdateOrchestrationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            topic_dir = workspace / "docs/fixture"
+            topic_dir.mkdir()
+            review_dir = paper_index.parent / "001_Agent"
+            review_dir.mkdir()
+            _ = (review_dir / "review.md").write_text(
+                "# Agent\n\n## Essence\nagent model agent\n",
+                encoding="utf-8",
+            )
             first = build_transitional_sparse_index("fixture", workspace)
             first_bytes = first.read_bytes()
             second = build_transitional_sparse_index("fixture", workspace)
@@ -150,8 +158,9 @@ class SafeUpdateOrchestrationTests(unittest.TestCase):
             )
             self.assertEqual(value["schema_version"], 2)
             self.assertIn("sparse", str(value["schema"]))
-            self.assertFalse(
-                (workspace / "docs/fixture/_search_index.json").exists()
+            self.assertEqual(
+                first.resolve(),
+                (workspace / "docs/fixture/_search_index.json").resolve(),
             )
 
     def test_review_path_always_publishes_empty_geometry_manifest(self) -> None:

@@ -1,70 +1,137 @@
-"""Regression coverage for cross-index provenance metadata."""
+"""Regression coverage for sparse cross-index provenance."""
+
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import build_cross_index  # noqa: E402
+import pipeline.build_cross_index as cross
+from pipeline.sparse_index import (
+    DurableIO,
+    DurabilityError,
+    SPARSE_SCHEMA,
+    SparseIndexError,
+    build_cross_sparse_index,
+    build_sparse_index,
+    restore_transaction,
+)
 
 
 class CrossIndexFingerprintTests(unittest.TestCase):
-    def _source(self, root: Path, topic: str, fingerprint: str, byte: int) -> None:
-        directory = root / topic
-        directory.mkdir(parents=True, exist_ok=True)
-        index = {
-            "model": "model", "dim": 2, "quant": "int8-l2norm", "count": 1,
-            "source_fingerprint": fingerprint,
-            "papers": {f"{topic}-paper": {"title": topic}},
-            "chunks": [{"slug": f"{topic}-paper", "text": topic}],
-        }
-        (directory / build_cross_index.SEARCH_INDEX).write_text(json.dumps(index), encoding="utf-8")
-        (directory / build_cross_index.EMB_BIN).write_bytes(bytes([byte, byte]))
+    def _source(self, root: Path, topic: str, text: str) -> None:
+        papers = root / "papers"
+        papers.mkdir(parents=True, exist_ok=True)
+        index_path = papers / "_papers_index.json"
+        rows = (
+            cast(
+                list[dict[str, object]],
+                cast(
+                    object,
+                    json.loads(index_path.read_text(encoding="utf-8")),
+                ),
+            )
+            if index_path.exists()
+            else []
+        )
+        slug = f"{topic}-paper"
+        rows = [row for row in rows if row["slug"] != slug]
+        rows.append({"slug": slug, "title": topic, "topics": [topic]})
+        _ = index_path.write_text(json.dumps(rows), encoding="utf-8")
+        review = papers / slug
+        review.mkdir(exist_ok=True)
+        _ = (review / "review.md").write_text(
+            f"# {topic}\n\n## Essence\n{text}\n",
+            encoding="utf-8",
+        )
+        (root / topic).mkdir(exist_ok=True)
+        _ = build_sparse_index(topic, root)
 
-    def test_merge_records_sources_and_changes_fingerprint(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._source(root, "alpha", "source-a", 1)
-            self._source(root, "beta", "source-b", 2)
-            with patch.object(build_cross_index, "DOCS_DIR", root):
-                first, _, _ = build_cross_index.merge_indexes(["alpha", "beta"])
+    def test_merge_records_sources_and_changes_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._source(root, "alpha", "agent graph")
+            self._source(root, "beta", "model graph")
+            with patch.object(cross, "DOCS_DIR", root):
+                first, sidecar, sources = cross.merge_indexes(["alpha", "beta"])
+                self.assertEqual(first["schema"], SPARSE_SCHEMA)
                 self.assertEqual(first["source_file_count"], 2)
-                self.assertEqual(first["source_indexes"]["alpha"]["source_fingerprint"], "source-a")
-                self.assertEqual(first["count"], 2)
-                self._source(root, "alpha", "source-a-revised", 3)
-                second, _, _ = build_cross_index.merge_indexes(["alpha", "beta"])
-            self.assertNotEqual(first["source_fingerprint"], second["source_fingerprint"])
-            self.assertNotEqual(first["source_indexes"]["alpha"]["index_sha256"],
-                                second["source_indexes"]["alpha"]["index_sha256"])
+                self.assertEqual(sidecar, b"")
+                self.assertIn("indexes", sources)
+                first_fingerprint = first["source_fingerprint"]
+                self._source(root, "alpha", "agent graph changed")
+                second, _, _ = cross.merge_indexes(["alpha", "beta"])
+            self.assertNotEqual(
+                first_fingerprint,
+                second["source_fingerprint"],
+            )
+            self.assertFalse((root / "_cross" / cross.EMB_BIN).exists())
 
-    def test_merge_rejects_unknown_quantization(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._source(root, "alpha", "source-a", 1)
-            path = root / "alpha" / build_cross_index.SEARCH_INDEX
-            index = json.loads(path.read_text(encoding="utf-8"))
-            index["quant"] = "float32"
-            path.write_text(json.dumps(index), encoding="utf-8")
-            with patch.object(build_cross_index, "DOCS_DIR", root):
-                with self.assertRaisesRegex(SystemExit, "지원하지 않는 양자화"):
-                    build_cross_index.merge_indexes(["alpha"])
+    def test_merge_rejects_non_sparse_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            topic = root / "alpha"
+            topic.mkdir()
+            _ = (topic / cross.SEARCH_INDEX).write_text(
+                json.dumps({"papers": {}}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(SparseIndexError):
+                _ = cross.build_cross_index(["alpha"], docs_dir=root)
 
-    def test_merge_rejects_missing_model(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._source(root, "alpha", "source-a", 1)
-            path = root / "alpha" / build_cross_index.SEARCH_INDEX
-            index = json.loads(path.read_text(encoding="utf-8"))
-            index["model"] = None
-            path.write_text(json.dumps(index), encoding="utf-8")
-            with patch.object(build_cross_index, "DOCS_DIR", root):
-                with self.assertRaisesRegex(SystemExit, "모델 정보"):
-                    build_cross_index.merge_indexes(["alpha"])
+    def test_cross_journal_restores_prior_sparse_active(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._source(root, "alpha", "agent graph")
+            first = build_cross_sparse_index(
+                ["alpha"],
+                root,
+                run_id="cross-first",
+            )
+            first_hash = first.active_path.read_bytes()
+            self._source(root, "alpha", "agent graph revised")
+            second = build_cross_sparse_index(
+                ["alpha"],
+                root,
+                run_id="cross-second",
+            )
+            manifest = cast(Path, second.manifest_path)
+            restored = restore_transaction(manifest, root)
+            self.assertEqual(restored.phase, "restored")
+            self.assertEqual(first_hash, restored.active_path.read_bytes())
+
+    def test_cross_preflight_failure_creates_no_output_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._source(root, "alpha", "agent graph")
+
+            class Refuse:
+                def preflight(self, _root: Path, _paths: list[Path]) -> None:
+                    raise DurabilityError("preflight-refused")
+
+                def durable_write(self, _path: Path, _data: bytes) -> None:
+                    raise AssertionError("write after refusal")
+
+                def move(self, _source: Path, _target: Path) -> None:
+                    raise AssertionError("move after refusal")
+
+                def sync_file(self, _path: Path) -> None:
+                    raise AssertionError("sync after refusal")
+
+            with self.assertRaises(DurabilityError):
+                _ = build_cross_sparse_index(
+                    ["alpha"],
+                    root,
+                    durability=cast(
+                        DurableIO,
+                        cast(object, Refuse()),
+                    ),
+                )
+            self.assertFalse((root / "_cross").exists())
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _ = unittest.main()
