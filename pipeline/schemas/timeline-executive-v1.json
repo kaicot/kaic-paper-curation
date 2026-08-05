@@ -1,0 +1,1 @@
+{"$id":"https://paper-curation.local/schemas/timeline-executive-v1.json","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"executive_summary_ko":{"minLength":80,"type":"string"}},"required":["executive_summary_ko"],"type":"object"}
