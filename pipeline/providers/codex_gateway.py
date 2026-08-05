@@ -295,3 +295,9 @@ class CodexGateway:
     def capability_inventory(self) -> JsonObject:
         attestation = self._verify_attestation()
         return {"attested": True, "cli_version": attestation["cli_version"], "contract_sha256": attestation["contract_sha256"], "paid_api": False, "policy_sha256": attestation["policy_sha256"], "provider": "saved-chatgpt-auth-codex-cli", "roles": attestation["roles"], "schema": "codex-capabilities-v1", "schema_version": 1}
+
+    def preflight(self) -> JsonObject:
+        """Verify the attested executable and saved login without generation."""
+        inventory = self.capability_inventory()
+        self._status()
+        return inventory
