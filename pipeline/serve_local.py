@@ -121,6 +121,7 @@ class LocalHandler(SimpleHTTPRequestHandler):
     def handle_expect_100(self) -> bool:
         preflight = self._preflight()
         if preflight is not None:
+            self.close_connection = True
             self._send_error(*preflight)
             return False
         self.send_response_only(100)
@@ -130,6 +131,7 @@ class LocalHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         route = self.path.split("?", 1)[0]
         if route != "/api/answer":
+            self._discard_bounded_body()
             self._send_error(404, "not-found")
             return
         preflight = self._preflight()
@@ -154,6 +156,19 @@ class LocalHandler(SimpleHTTPRequestHandler):
             self._send_error(error.status, error.code)
             return
         self._send_json(200, response)
+
+    def _discard_bounded_body(self) -> None:
+        if self.headers.get("Transfer-Encoding") is not None:
+            return
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1:
+            return
+        try:
+            length = int(lengths[0])
+        except ValueError:
+            return
+        if 0 < length <= MAX_BODY_BYTES:
+            _ = self.rfile.read(length)
 
     def _preflight(self) -> tuple[int, str] | None:
         expected = urlsplit(self.local_server.public_url)
