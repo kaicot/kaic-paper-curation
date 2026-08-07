@@ -108,7 +108,7 @@ def _identity_factory(**values: object) -> CacheIdentity:
         role=role,
         model="gpt-5.6-luna" if role == "short_form" else "gpt-5.6-terra",
         reasoning_effort="xhigh",
-        cli_version="0.146.0",
+        cli_version="0.146.1",
         signed_binary_sha256="1" * 64,
         attestation_sha256="2" * 64,
         contract_sha256="3" * 64,
