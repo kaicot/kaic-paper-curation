@@ -18,8 +18,8 @@ from pipeline.schemas.codex_schema import JsonObject, JsonValue, SchemaError, va
 
 
 CodexRole: TypeAlias = Literal["long_form", "short_form"]
-EXPECTED_VERSION: Final = "0.146.0"
-EXPECTED_POLICY_CONTENT_SHA256: Final = "64d66d1437f9129b5bea912619e4a7e37d7015a91d0ad3c4c21b437e44fa7d82"
+EXPECTED_VERSION: Final = "0.146.1"
+EXPECTED_POLICY_CONTENT_SHA256: Final = "247ddff6dec6f71bc0a93ca73dc3378ff10a296314ad29332c19487c3e8deead"
 EXPECTED_AUTH: Final = "Logged in using ChatGPT"
 ROLE_MODELS: Final[dict[CodexRole, tuple[str, str]]] = {
     "long_form": ("gpt-5.6-terra", "xhigh"),
