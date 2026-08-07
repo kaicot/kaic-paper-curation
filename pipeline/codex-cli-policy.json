@@ -1,11 +1,11 @@
 {
-  "attestation_path": ".omo/runtime/codex-resolved.json",
-  "authenticode_status": "Valid",
-  "canonical_executable": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
-  "canonical_final_executable": "C:\\Users\\Administrator\\.codex\\packages\\standalone\\releases\\0.146.0-x86_64-pc-windows-msvc\\bin\\codex.exe",
-  "cli_version": "0.146.0",
-  "contract_path": "pipeline/codex-cli-contract.json",
-  "schema": "codex-cli-policy-v1",
-  "schema_version": 1,
-  "signer": "CN=\"OpenAI OpCo, LLC\", O=\"OpenAI OpCo, LLC\", L=San Francisco, S=California, C=US"
+ "attestation_path": ".omo/runtime/codex-resolved.json",
+ "authenticode_status": "Valid",
+ "canonical_executable": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
+ "canonical_final_executable": "C:\\Users\\Administrator\\.codex\\packages\\standalone\\releases\\0.146.1-x86_64-pc-windows-msvc\\bin\\codex.exe",
+ "cli_version": "0.146.1",
+ "contract_path": "pipeline/codex-cli-contract.json",
+ "schema": "codex-cli-policy-v1",
+ "schema_version": 1,
+ "signer": "CN=\"OpenAI OpCo, LLC\", O=\"OpenAI OpCo, LLC\", L=San Francisco, S=California, C=US"
 }
