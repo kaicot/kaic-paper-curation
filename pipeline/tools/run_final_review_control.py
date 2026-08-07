@@ -79,7 +79,9 @@ def f1_control(kind: str, evidence_root: Path, scratch_root: Path, out: Path | N
         timeout=300,
     )
     observed = result.returncode
-    shutil.rmtree(scratch)
+    # Best-effort cleanup: copied evidence files may be transiently lock-held
+    # (OneDrive sync / Defender), so removal failure must not fail the control.
+    shutil.rmtree(scratch, ignore_errors=True)
     payload = {
         "schema": "final-review-negative-v1",
         "schema_version": 1,
