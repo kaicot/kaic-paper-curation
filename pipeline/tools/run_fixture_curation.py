@@ -37,13 +37,13 @@ def make_identity(source: bytes) -> CacheIdentity:
     )
 
 
-def deterministic_review(text: str, metadata: dict) -> dict:
+def deterministic_review(text: str, metadata: dict[str, object]) -> dict[str, str]:
     body = (
         "## Essence\n" + text.strip().splitlines()[0] + "\n\n"
         "## Method\nDeterministic fixture curation (no paid provider).\n\n"
         "## Result\nOne review, one HTML page, one BM25 index entry.\n"
     )
-    return {"title": metadata["title"], "review": body}
+    return {"title": str(metadata["title"]), "review": body}
 
 
 def main() -> int:
