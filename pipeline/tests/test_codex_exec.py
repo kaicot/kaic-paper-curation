@@ -45,7 +45,7 @@ class FakeRunner:
         self.calls.append(request)
         arguments = request.argv[1:]
         if arguments == ("--version",):
-            return subprocess.CompletedProcess(request.argv, 0, b"codex-cli 0.146.0\n", b"")
+            return subprocess.CompletedProcess(request.argv, 0, b"codex-cli 0.146.1\n", b"")
         if arguments == ("login", "status"):
             return subprocess.CompletedProcess(request.argv, 0, b"", (self.auth_status + "\n").encode())
         if arguments and arguments[0] == "exec":
