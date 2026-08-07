@@ -70,7 +70,7 @@ def main() -> int:
     args = parser.parse_args(namespace=FixtureOptions())
 
     fixture = args.fixture.resolve()
-    manifest: JsonObject = json.loads((fixture / "expected-artifacts-v1.json").read_text(encoding="utf-8"))
+    manifest: JsonObject = cast(JsonObject, json.loads((fixture / "expected-artifacts-v1.json").read_text(encoding="utf-8")))
     seed = fixture / "seed"
     paper_dir = args.docs_root / "papers" / SLUG
     paper_dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +78,7 @@ def main() -> int:
         _ = shutil.copyfile(seed / relative, paper_dir / Path(relative).name)
 
     text: str = (paper_dir / "text.md").read_text(encoding="utf-8")
-    metadata: JsonObject = json.loads((paper_dir / "metadata.json").read_text(encoding="utf-8"))
+    metadata: JsonObject = cast(JsonObject, json.loads((paper_dir / "metadata.json").read_text(encoding="utf-8")))
     cache = GenerationCache(args.cache_dir)
     events_path = args.docs_root / "provider-events.jsonl"
     events: list[JsonObject] = []
@@ -92,13 +92,13 @@ def main() -> int:
         events.append(event)
 
     review_path = paper_dir / "review.md"
-    review_path.write_text(f"# {result['title']}\n\n{result['review']}\n", encoding="utf-8")
-    (paper_dir / "index.html").write_text(
+    _ = review_path.write_text(f"# {result['title']}\n\n{result['review']}\n", encoding="utf-8")
+    _ = (paper_dir / "index.html").write_text(
         f"<!doctype html><title>{result['title']}</title><main>{result['review']}</main>", encoding="utf-8"
     )
     figures = paper_dir / "figures"
     figures.mkdir(exist_ok=True)
-    (figures / "manifest-v1.json").write_text(
+    _ = (figures / "manifest-v1.json").write_text(
         json.dumps({"schema": "figure-manifest-v1", "figures": []}), encoding="utf-8"
     )
 
