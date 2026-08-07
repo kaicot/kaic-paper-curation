@@ -144,6 +144,9 @@ def f2_control(
                 "api_key = 'sk-" + "ant-" + "A" * 56 + "'\n",
                 encoding="utf-8",
             )
+            # scan-secrets --working-tree only scans tracked files, so the
+            # injected fixture must be staged in the disposable worktree.
+            subprocess.run(["git", "add", "pipeline/_disposable_secret.py"], cwd=repo_copy, capture_output=True, check=True)
             validator = [
                 sys.executable,
                 str(repo_copy / "scripts/scan-secrets.py"),
