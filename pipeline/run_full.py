@@ -52,6 +52,7 @@ class RunOptions:
     llm_mode: str | None = None
     mode: str = "curate"
     source: str = "zotero"
+    fixture: Path | None = None
     images: str = "skip"
     with_search: bool = False
     no_search: bool = False
@@ -119,8 +120,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _ = parser.add_argument(
         "--source",
-        choices=["web", "zotero"],
+        choices=["web", "zotero", "fixture"],
         default="zotero",
+    )
+    _ = parser.add_argument(
+        "--fixture",
+        type=Path,
+        default=None,
+        help="tracked one-paper fixture directory (requires --source fixture)",
     )
     _ = parser.add_argument(
         "--images",
@@ -158,6 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def resolve_source_routing(args: RunOptions) -> dict[str, bool]:
+    if args.source == "fixture":
+        return {"search": False, "register": False, "sync": False}
     routing = (
         {"search": True, "register": True, "sync": True}
         if args.source == "web"
@@ -281,6 +290,23 @@ def _pipeline_plan(
     policy: RuntimePolicy,
     python: str | Path,
 ) -> list[list[str]]:
+    if args.source == "fixture":
+        if not args.fixture:
+            print("fixture-path-required", file=sys.stderr)
+            raise SystemExit(2)
+        return [
+            [
+                str(python),
+                "-u",
+                str(PIPELINE / "tools/run_fixture_curation.py"),
+                "--topic",
+                args.topic,
+                "--fixture",
+                str(args.fixture),
+                "--docs-root",
+                str(args.docs_dir.resolve()),
+            ]
+        ]
     routing = resolve_source_routing(args)
     prefix = [str(python), "-u"]
     commands: list[list[str]] = []
@@ -382,7 +408,7 @@ def main(
                 code = 124
             if code != 0:
                 return int(code)
-        if tools is None and args.mode == "curate":
+        if tools is None and args.mode == "curate" and args.source != "fixture":
             try:
                 validators = validate_default_artifacts(
                     args.topic,
