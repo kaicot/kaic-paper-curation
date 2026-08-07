@@ -14,7 +14,9 @@ import hashlib
 import json
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -25,6 +27,16 @@ from pipeline.schemas.codex_schema import JsonObject
 
 SLUG = "001_Alpha"
 FIXTURE = REPO_ROOT / "pipeline" / "tests" / "fixtures" / "one_paper"
+
+
+@dataclass
+class FixtureOptions:
+    topic: str = ""
+    fixture: Path = FIXTURE
+    docs_root: Path = REPO_ROOT / "docs"
+    state_dir: Path = REPO_ROOT / "run" / "state"
+    cache_dir: Path = REPO_ROOT / "run" / "cache"
+    json_out: Path | None = None
 
 
 def make_identity(source: bytes) -> CacheIdentity:
@@ -38,45 +50,45 @@ def make_identity(source: bytes) -> CacheIdentity:
     )
 
 
-def deterministic_review(text: str, metadata: dict[str, object]) -> JsonObject:
+def deterministic_review(text: str, metadata: JsonObject) -> JsonObject:
     body = (
         "## Essence\n" + text.strip().splitlines()[0] + "\n\n"
-        "## Method\nDeterministic fixture curation (no paid provider).\n\n"
-        "## Result\nOne review, one HTML page, one BM25 index entry.\n"
+        + "## Method\nDeterministic fixture curation (no paid provider).\n\n"
+        + "## Result\nOne review, one HTML page, one BM25 index entry.\n"
     )
     return {"title": str(metadata["title"]), "review": body}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--topic", required=True)
-    parser.add_argument("--fixture", type=Path, required=True)
-    parser.add_argument("--docs-root", type=Path, default=REPO_ROOT / "docs")
-    parser.add_argument("--state-dir", type=Path, default=REPO_ROOT / "run" / "state")
-    parser.add_argument("--cache-dir", type=Path, default=REPO_ROOT / "run" / "cache")
-    parser.add_argument("--json-out", type=Path)
-    args = parser.parse_args()
+    _ = parser.add_argument("--topic", required=True)
+    _ = parser.add_argument("--fixture", type=Path, required=True)
+    _ = parser.add_argument("--docs-root", type=Path, default=REPO_ROOT / "docs")
+    _ = parser.add_argument("--state-dir", type=Path, default=REPO_ROOT / "run" / "state")
+    _ = parser.add_argument("--cache-dir", type=Path, default=REPO_ROOT / "run" / "cache")
+    _ = parser.add_argument("--json-out", type=Path)
+    args = parser.parse_args(namespace=FixtureOptions())
 
     fixture = args.fixture.resolve()
-    manifest = json.loads((fixture / "expected-artifacts-v1.json").read_text(encoding="utf-8"))
+    manifest: JsonObject = json.loads((fixture / "expected-artifacts-v1.json").read_text(encoding="utf-8"))
     seed = fixture / "seed"
     paper_dir = args.docs_root / "papers" / SLUG
     paper_dir.mkdir(parents=True, exist_ok=True)
-    for relative in manifest["seed_files"]:
-        shutil.copyfile(seed / relative, paper_dir / Path(relative).name)
+    for relative in [str(x) for x in cast("list[object]", manifest["seed_files"])]:
+        _ = shutil.copyfile(seed / relative, paper_dir / Path(relative).name)
 
-    text = (paper_dir / "text.md").read_text(encoding="utf-8")
-    metadata = json.loads((paper_dir / "metadata.json").read_text(encoding="utf-8"))
+    text: str = (paper_dir / "text.md").read_text(encoding="utf-8")
+    metadata: JsonObject = json.loads((paper_dir / "metadata.json").read_text(encoding="utf-8"))
     cache = GenerationCache(args.cache_dir)
     events_path = args.docs_root / "provider-events.jsonl"
-    events = []
+    events: list[JsonObject] = []
     with events_path.open("a", encoding="utf-8", newline="\n") as stream:
         result = cache.get_or_generate(
             make_identity(text.encode("utf-8")),
             lambda: CacheSuccess(result=deterministic_review(text, metadata)),
         )
-        event = {"capability": "codex_generation", "role": "terra", "source": "fixture"}
-        stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+        event: JsonObject = {"capability": "codex_generation", "role": "terra", "source": "fixture"}
+        _ = stream.write(json.dumps(event, ensure_ascii=False) + "\n")
         events.append(event)
 
     review_path = paper_dir / "review.md"
@@ -90,7 +102,7 @@ def main() -> int:
         json.dumps({"schema": "figure-manifest-v1", "figures": []}), encoding="utf-8"
     )
 
-    payload = {
+    payload: dict[str, object] = {
         "schema": "canary-evidence-v1",
         "schema_version": 1,
         "topic": args.topic,
@@ -110,8 +122,8 @@ def main() -> int:
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         with args.json_out.open("x", encoding="utf-8") as stream:
-            stream.write(text_out + "\n")
-    sys.stdout.write(text_out + "\n")
+            _ = stream.write(text_out + "\n")
+    _ = sys.stdout.write(text_out + "\n")
     return 0
 
 
