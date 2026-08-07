@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from pipeline.lib.generation_cache import CacheIdentity, CacheSuccess, GenerationCache
+from pipeline.schemas.codex_schema import JsonObject
 
 SLUG = "001_Alpha"
 FIXTURE = REPO_ROOT / "pipeline" / "tests" / "fixtures" / "one_paper"
@@ -37,7 +38,7 @@ def make_identity(source: bytes) -> CacheIdentity:
     )
 
 
-def deterministic_review(text: str, metadata: dict[str, object]) -> dict[str, str]:
+def deterministic_review(text: str, metadata: dict[str, object]) -> JsonObject:
     body = (
         "## Essence\n" + text.strip().splitlines()[0] + "\n\n"
         "## Method\nDeterministic fixture curation (no paid provider).\n\n"
