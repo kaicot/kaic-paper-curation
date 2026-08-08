@@ -19,12 +19,48 @@
 
 🇬🇧 [English README](README.en.md)
 
+## 릴리스 상태 및 버전 관리
+
+현재 프로젝트 버전은 **0.1.0**입니다. 정확한 버전은 저장소 루트의
+[`VERSION`](VERSION) 파일이 단일 기준이며, 변경 내역은
+[`CHANGELOG.md`](CHANGELOG.md)에 기록합니다.
+
+### 0.1.0 — 2026-08-08
+
+이번 릴리스에서 다음 작업을 완료했습니다.
+
+- Codex saved-auth(ChatGPT 로그인) 기반 Terra/Luna 생성 게이트웨이와
+  유료 API fallback 영구 차단
+- setup/doctor/run_full의 fail-closed 정책 및 감사 가능한 release evidence
+- BM25 기본 검색과 local Deep Research answer 서버
+- one-paper fixture 기반 curation/cache/resume/release 검증
+- Codex CLI `0.147.0` signed boundary 재검증
+- release gate evidence `238 passed, 0 failed, 0 skipped`, F1~F4 최종 검토 PASS
+
+> 참고: 고정 환경에서 전체 `unittest discover`를 실행하면 release gate 밖의
+> 기존 metrics 테스트가 추가로 수집됩니다. 현재 `python-dateutil` 환경 누락과
+> 오래된 pipeline wiring assertion 3 errors/1 failure가 남아 있으며, 이번
+> 릴리스 변경에서 발생한 회귀는 아닙니다.
+
+### 버전 규칙
+
+- **SemVer**(`MAJOR.MINOR.PATCH`)를 사용합니다.
+- `0.x.y` 단계에서는 호환 가능한 버그 수정·문서·테스트 변경은 PATCH를
+  올리고, 기능 추가나 CLI/config/schema 동작 변경은 MINOR를 올립니다.
+- `1.0.0` 이후 호환되지 않는 CLI/config/schema 또는 persisted-data 변경은
+  MAJOR를 올립니다.
+- 모든 릴리스는 `VERSION`, `CHANGELOG.md`, README의 릴리스 요약을 함께
+  갱신하고, 검증 후 `vMAJOR.MINOR.PATCH` Git tag를 사용합니다.
+- 프로젝트 버전과 Codex CLI 버전은 별개입니다. 현재 Codex CLI pin은
+  `pipeline/codex-cli-policy.json`의 `0.147.0`입니다.
+
 ![Paper Curation 파이프라인](workflow.png)
 
 > 🐱 **한 장으로 보는 전체 파이프라인** — 수집부터 배포까지, 고양이들이 대신합니다.
 
 ## 목차
 
+- [릴리스 상태 및 버전 관리](#릴리스-상태-및-버전-관리)
 - [📖 독자로 둘러보기](#-독자로-둘러보기)
 - [🔧 운영자로 설치하기](#-운영자로-설치하기)
 - [💳 크레딧 가이드](#-크레딧-가이드)

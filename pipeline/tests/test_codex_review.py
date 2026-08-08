@@ -54,7 +54,7 @@ def _identity(**changes: str) -> CacheIdentity:
         "role": "long_form",
         "model": "gpt-5.6-terra",
         "reasoning_effort": "xhigh",
-        "cli_version": "0.146.1",
+        "cli_version": "0.147.0",
         "signed_binary_sha256": "1" * 64,
         "attestation_sha256": "2" * 64,
         "contract_sha256": "3" * 64,
