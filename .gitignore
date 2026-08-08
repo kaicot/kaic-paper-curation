@@ -6,6 +6,8 @@
 !.nojekyll
 !README.md
 !README.en.md
+!VERSION
+!CHANGELOG.md
 !SKILL.md
 !SKILL.md.template
 !config.example.json

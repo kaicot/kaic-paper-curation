@@ -12,6 +12,45 @@ Turn hundreds of papers into structured Korean reviews, auto-classify them with 
 
 ---
 
+## Release Status and Versioning
+
+The current project version is **0.1.0**. The repository-root
+[`VERSION`](VERSION) file is the single source of truth, and release notes live
+in [`CHANGELOG.md`](CHANGELOG.md).
+
+### 0.1.0 — 2026-08-08
+
+This release completes the local release path:
+
+- Codex saved-auth (ChatGPT login) Terra/Luna generation gateway with paid API
+  fallback permanently denied
+- Fail-closed setup, doctor, and `run_full` policy boundaries with auditable
+  release evidence
+- BM25-first retrieval and local Deep Research answer serving
+- One-paper fixture coverage for curation, cache, resume, and release checks
+- Attested Codex CLI `0.147.0` boundary requalification
+- Release-gate evidence: `238 passed, 0 failed, 0 skipped`; F1–F4 final gates
+  PASS
+
+> Note: broad `unittest discover` also collects legacy metrics tests outside
+> the release gate. They currently report a missing `python-dateutil`
+> environment dependency and stale pipeline-wiring assertions (3 errors, 1
+> failure); these are pre-existing and not caused by this release diff.
+
+### Versioning rules
+
+- Use **Semantic Versioning** (`MAJOR.MINOR.PATCH`).
+- Before `1.0.0`, compatible bug fixes, documentation, and tests increment
+  PATCH; new features or CLI/config/schema behavior increment MINOR.
+- After `1.0.0`, incompatible CLI/config/schema or persisted-data changes
+  increment MAJOR.
+- Every release updates `VERSION`, `CHANGELOG.md`, and the README release
+  summary, then uses a `vMAJOR.MINOR.PATCH` Git tag after verification.
+- The project version is independent from the Codex CLI pin. The current
+  Codex CLI pin is `0.147.0` in `pipeline/codex-cli-policy.json`.
+
+---
+
 ## What It Does
 
 Features are split into **Core** (always produced by the default pipeline) and **Option** (enabled on demand).
