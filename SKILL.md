@@ -68,6 +68,8 @@ description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검�
 
 | 사용자 말 | LLM 행동 |
 |---|---|
+| "이 논문 좀 넣어줘" + PDF 파일/드래그 | `pipeline/tools/add_paper_to_zotero.py --pdf <경로> --collection <컬렉션>` 실행 (컬렉션 없으면 자동 생성). 완료 후 curation 자동 실행 |
+| "이 주소 논문 넣어줘" + URL | `add_paper_to_zotero.py --url <URL> --collection <컬렉션>` 실행 (arXiv/DOI 메타 자동 추출) |
 | "새 논문 리뷰해줘", "Zotero에 있는 거 정리해줘" | topic 확인 후 `run_full curate --source zotero` 실행, 완료되면 URL 안내 |
 | "오늘/이번 주 논문 찾아줘" | `curate --source web --days 7` 실행 |
 | "분류 다시 해줘" | `run_full --mode reclassify` |
@@ -81,6 +83,16 @@ description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검�
 "방금 N편의 리뷰가 완료됐습니다. 브라우저에서 `http://localhost:8000/<토픽>/` 를
 여시면 카테고리별로 보실 수 있어요." (localhost 라는 단어는 부가 설명 없이
 링크처럼 안내)
+
+**논문 등록 위자드** (PDF/URL → Zotero):
+- PDF: 사용자가 파일 경로를 주면 제목을 PDF 첫 페이지에서 추출해
+  `add_paper_to_zotero.py` 로 등록한다. 컬렉션 이름을 물어보고, 없으면 자동 생성.
+- URL: arXiv/DOI 주소면 자동으로 제목·저자·초록을 추출해 등록.
+- 등록이 끝나면 `--no-run` 없이 curation 까지 자동 실행하고 결과 URL 안내.
+- **주의**: Zotero 무료 계정 클라우드 저장공간(300MB)이 가득 차 있으면
+  PDF 클라우드 업로드는 실패한다. 도구는 `linked_file`(로컬 링크) 방식을 쓰므로
+  로컬 PDF 경로가 있으면 저장공간 없이 등록된다. 등록한 PDF는 로컬 경로에
+  있어야 curation 에서 읽을 수 있다.
 
 </Wizard_Daily_Use>
 

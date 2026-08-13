@@ -57,6 +57,26 @@
   PYTHONUTF8=1 python pipeline/tools/inspect_local_zotero.py --json
   ```
 
+- **`add_paper_to_zotero.py`** — PDF 파일이나 논문 URL을 받아 Zotero에
+  **컬렉션 자동 생성 + 등록 + curation 자동 실행** (생초보용):
+
+  ```bash paper-curation-command
+  # PDF로 등록 (컬렉션 없으면 자동 생성, 등록 후 리뷰까지 실행)
+  PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py \
+    --pdf path/to/paper.pdf --collection "내 논문"
+
+  # arXiv/DOI URL로 등록 (메타데이터 자동 추출)
+  PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py \
+    --url https://arxiv.org/abs/2401.00001 --collection "내 논문"
+
+  # 등록만 하고 리뷰는 나중에
+  PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py \
+    --pdf paper.pdf --collection "내 논문" --no-run
+  ```
+
+  PDF 첨부는 `linked_file`(로컬 경로 링크) 방식이라 **Zotero 클라우드
+  저장공간(무료 300MB)이 부족해도** 등록됩니다.
+
 - **LLM 위자드 설치 흐름** — 아래 “설치하기” 참고.
 
 ---
@@ -110,6 +130,8 @@ Zotero 앱이 이미 PC에 설치되어 있다면 **API 키 없이** 시작할 �
 
 | 사용자 말 | LLM이 하는 일 |
 |---|---|
+| "이 논문 넣어줘" + PDF 파일 | Zotero 컬렉션 자동 생성·등록 → 리뷰까지 실행 |
+| "이 주소 논문 넣어줘" + arXiv/DOI URL | 메타데이터 자동 추출 → Zotero 등록 → 리뷰 실행 |
 | "새 논문 리뷰해줘" | Zotero 컬렉션 갱신 + 리뷰 실행, 완료 후 URL 안내 |
 | "웹에서 보고 싶어" | 로컬 서버를 켜고 `http://localhost:8000/<토픽>/` 안내 |
 | "오늘 나온 논문 찾아줘" | 웹 검색 + Zotero 등록 + 리뷰 실행 |
