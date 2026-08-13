@@ -22,10 +22,16 @@ import urllib.error
 from datetime import datetime
 from pathlib import Path
 
-from config_loader import get_topic_dir, PROJECT_ROOT
+import sys
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from pipeline.config_loader import get_topic_dir, PROJECT_ROOT  # noqa: E402
 REPO = str(PROJECT_ROOT)
 
-from config_loader import (
+from pipeline.config_loader import (  # noqa: E402
     get_zotero_api_key,
     get_zotero_user_id,
     get_collection_key,
@@ -33,7 +39,7 @@ from config_loader import (
     get_unpaywall_email,
     _ssl_ctx,
 )
-from lib.bib_enrich import enrich as enrich_bib, to_zotero_item
+from pipeline.lib.bib_enrich import enrich as enrich_bib, to_zotero_item  # noqa: E402
 
 API_KEY = get_zotero_api_key()
 USER_ID = get_zotero_user_id()
@@ -652,7 +658,7 @@ def fix_metadata(collection_key, dry_run=False, limit=None):
         if cur_type == "preprint" and not d.get("repository") and enriched.get("publisher"):
             patch["repository"] = str(enriched["publisher"])
         if not d.get("creators") and enriched.get("authors"):
-            from lib.bib_enrich import _parse_authors as _pa  # local helper reuse
+            from pipeline.lib.bib_enrich import _parse_authors as _pa  # local helper reuse
             patch["creators"] = _pa(enriched["authors"])
         # date: if existing date is just year and CrossRef has full YYYY-MM-DD
         new_date = enriched.get("date", "")
