@@ -7,6 +7,9 @@ description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검�
 
 <Purpose>
 특정 시기(기본: 지난 24시간)와 분야(기본: science of science, bibliometrics, scientometrics)의 최신 논문을 arXiv, Semantic Scholar, OpenAlex에서 자동 검색하고, 중복 제거 및 관련성 필터링 후 Zotero에 일괄 등록한다. 등록된 논문에 대해 paper-review를 실행하고, 토픽 인덱스와 Deep Research 검색 인덱스(`_search_index.json`, BM25 기본)를 빌드한다. 생성은 Codex saved-auth(ChatGPT 로그인)만 사용하며 유료 API 키로의 fallback 은 없다. **Phase 1~7 전체를 항상 실행한다 (부분 실행 없음).**
+사용자가 localhost·터미널·명령어를 몰라도 되도록, **설치부터 매일 사용까지 LLM이
+step-by-step으로 안내**한다. 사용자에게는 질문에 답하고 결과를 브라우저로 보는
+것만 요구한다.
 </Purpose>
 
 <Use_When>
@@ -631,6 +634,10 @@ User: "이 논문 리뷰해줘"
 </Escalation_And_Stop_Conditions>
 
 <Final_Checklist>
+- [ ] 설치 요청 → <Wizard_Installation> 흐름 (한 번에 하나씩 질문)
+- [ ] 일상 사용 → <Wizard_Daily_Use> 표로 요청 매핑
+- [ ] 결과 요약 + 열람 URL(`http://localhost:8000/{topic}/`) 안내
+- [ ] 서버 꺼져 있으면 자동 실행 후 URL 안내
 - [ ] 3개 소스 검색 완료 (arXiv, Semantic Scholar, OpenAlex)
 - [ ] 중복 제거 완료
 - [ ] 관련성 필터링 적용
