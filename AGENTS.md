@@ -7,11 +7,11 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 Academic paper curation pipeline. Papers are fetched from Zotero, reviewed via local Codex (ChatGPT saved-auth, Terra/Luna roles), classified into categories, and published as a searchable HTML index with per-paper review pages. Topic pages also expose a **Deep Research UI** that performs client-side RAG against a pre-built BM25 index (dense hybrid optional) and streams answers with `[ref:N]` citations and inline figures. Query embeddings are computed for the reader by the worker `/api/embed` route (deployed) or `pipeline/serve_local.py` (local), so readers need no API key for retrieval — keys (BYOK) are only for answer generation.
 
 - **Topics**: Configured per-user in `config.json` (e.g., `ai4s`, `scisci`, `bioml`). Per-topic Core-1 search keywords are configurable via the `search_keywords` block (`{topic: {primary: [...], secondary: [...]}}`); `ai4s`/`scisci` ship built-in defaults, so new topics add their own there.
-- **Deploy architecture** (split hosting):
-  - **Cloudflare Workers (Static Assets + Functions)** serves the full content at the custom domain `paper-curation.jehyunlee.dev` (the `CF_BASE_URL` constant in `prepare_deploy.py`, provisioned via the `[[routes]]` block in `wrangler.toml`; the default `*.workers.dev` URL also resolves but is not the canonical one). `pipeline/prepare_deploy.py` runs `npx wrangler deploy` (token via `CLOUDFLARE_API_TOKEN`/`CF_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`). Uploads everything under `docs/` except entries in `docs/.assetsignore` (ai4s/scisci are local-only). `worker/index.js` exposes two routes that need wrangler secrets (`wrangler secret put`): `/api/embed` (Deep Research query embeddings — `GOOGLE_API_KEY`) and `/api/audio-email` (Audio Overview email — `RESEND_API_KEY`).
-  - **GitHub `gh-pages` branch** holds tiny redirect stubs only — one `{topic}/index.html` per deployable topic that `meta refresh` + `window.location.replace()` to the Cloudflare URL. Synced idempotently by `prepare_deploy.py`.
-  - **GitHub `master` branch** holds only code, `config.example.json`, `wrangler.toml`, and `docs/.assetsignore`. `docs/papers/`, `docs/humanoid/`, `docs/physical-ai/`, etc. are `.gitignore`'d to keep the repo small (full content lives only on Cloudflare + local).
-  - User access: `jehyunlee.github.io/paper-curation/{topic}/` → gh-pages stub → Cloudflare URL → full content.
+- **Local-only**: This fork does NOT deploy. There is no Cloudflare Worker,
+  `wrangler.toml`, `prepare_deploy.py`, or `gh-pages` flow — those files were
+  removed. Results are viewed via `pipeline/serve_local.py` at
+  `http://localhost:8000/{topic}/`. The `master` branch holds code + configs;
+  generated content (`docs/papers/`, `docs/{topic}/`) stays local.
 - **Language**: All reviews are written in Korean with technical terms in English
 
 ## Installation Flow (Codex)
@@ -170,7 +170,6 @@ setup.py 출력의 "다음 단계" 섹션을 사용자에게 전달한다. 특�
 | 8 | `pipeline/build_topic_index.py` | Generate `{topic}/index.html` with cards, search, timelines, Deep Research UI |
 | 8.5 | `pipeline/build_search_index.py` | Build Deep Research RAG index — section-aware chunks + Google `gemini-embedding-001` (`output_dimensionality=768`, `task_type=RETRIEVAL_DOCUMENT`; non-3072 차원은 비정규화로 돌아오므로 **반드시 L2-normalize 후 int8 양자화**) + BM25 sparse terms → `{topic}/_search_index.json`. 쿼리 임베딩은 worker `/api/embed` / `serve_local.py` 가 `RETRIEVAL_QUERY` 로 처리 |
 | 9 | `pipeline/cleanup.py` | Remove stale files (old timelines, graphify temp, caches) + prune stale category entries from narrative JSONs |
-| 10 | `pipeline/prepare_deploy.py` | PNG→WebP, API-key strip/restore, `wrangler deploy` → Cloudflare, idempotent gh-pages stub sync, Cloudflare 200 OK polling, then master commit (code/config only — docs/* gitignored) |
 | Recover | `pipeline/audit_matching.py` | PDF↔review mismatch audit (duplicate text.md + 4-axis cross-check). Output `{topic}/_audit_report.json` |
 | Recover | `pipeline/fix_matching.py` | Recovery tool: delete review/figure artifacts for audit-flagged slugs + print re-review command. Default dry-run, `--execute` for real |
 |Tool|`pipeline/run_citedby.py`|**Citedby** — DOI 하나로 인용논문 수집(OpenAlex·Scopus·S2·arXiv) → 독창성 추출 → 주제 필터 + 5W1H 요약 → **자기완결 HTML 문서** + CSV. 브라우저 [PDF 출력] 버튼으로 링크 살아있는 PDF. 내 Zotero 라이브러리에 있는 논문은 `zotero://open-pdf` 바로열기 링크. 코어는 `pipeline/lib/citedby/`|
@@ -318,9 +317,6 @@ PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode reclassify
 # 타임라인 narrative + 이미지 재생성
 PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode retime --images all
 
-# 배포는 run_full 에서 제거됨 — 기존 배포 토픽(humanoid/physical-ai)의 재배포는
-# prepare_deploy.py 를 수동으로만 실행 (Worker secrets: wrangler secret put GOOGLE_API_KEY / RESEND_API_KEY)
-
 # 에이전트/CLI 읽기 전용 검색 — 기본 _cross, 빌드/파일 변경 없음
 python pipeline/query_search_index.py --query "scientific discovery agents" --mode bm25 --json
 python pipeline/query_search_index.py --topic humanoid --query "VLA action tokenization" --mode hybrid --json
@@ -378,7 +374,7 @@ PYTHONUTF8=1 python pipeline/cleanup.py --execute
 
 - **Bottom-up topic modeling**: `topic_modeling.py`는 BERTopic 대신 sklearn HDBSCAN + UMAP을 직접 사용. HDBSCAN fine-grained clustering → c-TF-IDF 키워드 추출 (Grootendorst 2022, 클러스터=1문서 tf × 클래스 idf) → Codex 배치 작명 → Codex 카테고리 그룹핑. `min_cluster_size`를 자동 조정하여 sub-topic 40~100개를 목표로 한다.
 - **Multi-class classification**: Papers get 1 `primary_category` + 1-3 `all_categories`. The topic index shows cards under every matching category.
-- **Whitelist .gitignore**: Everything is excluded by default (`*`), then only code + configs are whitelisted. Under `docs/` only `index.html` (landing redirect), `setup-guide.md`, and `.assetsignore` are tracked on master. All topic content (`docs/papers/`, `docs/humanoid/`, `docs/physical-ai/`, etc.) is gitignored — it lives locally and on Cloudflare, never on master. `wrangler deploy` uses `docs/` directly; `docs/.assetsignore` excludes ai4s/scisci and local caches from the Cloudflare upload.
+- **Whitelist .gitignore**: Everything is excluded by default (`*`), then only code + configs are whitelisted. Under `docs/` only `index.html` (landing redirect), `setup-guide.md`, and `.assetsignore` are tracked on master. All topic content (`docs/papers/`, `docs/{topic}/`, etc.) is gitignored — it lives locally only.
 - **Two themes**: `ai4s` uses red accent (#D63423), `scisci` uses blue (#2374D6). Theme selection flows through `review_to_html.py` and `build_topic_index.py`.
 - **Figure extraction**: PyMuPDF renders pages containing "Figure N" / "Fig. N" at 3x zoom. Up to 5 figures per paper from pages 0-14.
 - **Slug format**: `{NNN}_{Title_first_40_chars}` where NNN is zero-padded sequence number.
@@ -394,5 +390,5 @@ PYTHONUTF8=1 python pipeline/cleanup.py --execute
 - **Google Gemini API (optional)**: Figure validation in `pipeline/run_update_force.py`, TTS for Audio Overview, and optional **Deep Research dense embeddings** — `gemini-embedding-001` (`output_dimensionality=768`, `task_type=RETRIEVAL_DOCUMENT` for the index in `pipeline/build_search_index.py --with-dense`, `RETRIEVAL_QUERY` for queries). Query embeddings are served to readers by the worker `/api/embed` route (deployed) or `pipeline/serve_local.py` (local), so readers need no key for retrieval. Key from `GOOGLE_API_KEY` env var or `config.json` — **선택** (기본 BM25 인덱스는 키 불필요). **Gotcha**: non-3072 dims come back non-normalized — L2-normalize before int8 quantization.
 - **OpenAI API (optional)**: reader BYOK answer generation only. Key from `OPENAI_API_KEY` env var or the `openai_api_key` field in `config.json`.
 - **PyMuPDF (fitz)**: PDF text extraction and figure rendering
-- **Pillow**: PNG→WebP conversion in `pipeline/prepare_deploy.py`
+- **Pillow**: PNG→WebP conversion for figures
 - **Zotero PDF storage**: Path configured in `config.json` (`zotero.pdf_dir`)

@@ -2020,9 +2020,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Deprecated compatibility flag; no alternative model is invoked.",
     )
     parser.add_argument("--no-deploy", action="store_true",
-                        help="end-of-run prepare_deploy(wrangler deploy + gh-pages + master push)를 건너뛴다. "
-                             "무인 자동복구(auto_recover --execute)처럼 배포를 원치 않는 경우용. "
-                             "환경변수 PAPER_CURATION_NO_DEPLOY 로도 켤 수 있다.")
+                        help="Deprecated compatibility flag; deployment is removed in this fork.")
     parser.add_argument("--conn-full", action="store_true",
                         help="연결 캐시(_conn_topk_cache_k*.json)를 무시하고 이번 실행에서 전체 연결을 "
                              "재생성한다 (월간/대량 추가 후 주기적 full rebuild 용). 자식 프로세스"

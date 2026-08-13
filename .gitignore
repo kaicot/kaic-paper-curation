@@ -12,7 +12,6 @@
 !SKILL.md.template
 !config.example.json
 !requirements.txt
-!wrangler.toml
 !CLAUDE.md
 !AGENTS.md
 !workflow.png
@@ -42,11 +41,6 @@ pipeline/eval/results/
 !pipeline/tools/*.py
 !pipeline/tools/*.mjs
 
-# Cloudflare Worker function (handles /api/audio-email + serves static assets).
-# Deployed by `wrangler deploy` alongside docs/.
-!worker/
-!worker/*.js
-
 # Git hooks installer + helper scripts
 !scripts/
 !scripts/*
@@ -57,37 +51,12 @@ pipeline/eval/results/
 !.github/workflows/*.yml
 
 # Double-click launchers (serve docs/ + open topic site on localhost)
-!open.command
-!open_*.command
-
-# Operations: tracked policy/legal pages and reproducible cost-analysis sources.
-# Generated price binaries, backups, figures, and local state remain ignored.
-!operations/
-!operations/legalcheck/
-!operations/legalcheck/*.html
-!operations/price/
-!operations/price/*.py
-!operations/price/*.html
-
-# Reusable report sources and editable styles; generated build/output stay local.
-!reports/
-!reports/source/
-!reports/source/*.md
-!reports/styles/
-!reports/styles/*.css
-reports/build/
-reports/output/
-
 # Documentation (whitelist specific service files below)
 !docs/
 !docs/index.html
 !docs/setup-guide.md
 !docs/operations.md
 !docs/architecture.md
-
-# Public assets (conference talk slides, etc.) — tracked on master + GitHub-served
-!docs/public/
-!docs/public/**
 
 # docs/ is the Cloudflare Workers deploy source, NOT a GitHub-served asset.
 # Only the landing redirect, setup guide, and wrangler .assetsignore are

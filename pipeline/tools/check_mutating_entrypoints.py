@@ -51,7 +51,6 @@ _EXPLICIT_NAMES = {
     "cleanup_quarantine.py",
     "dedup_text.py",
     "dedup_zotero.py",
-    "prepare_deploy.py",
     "prepare_local_models.py",
     "reextract_figures.py",
     "setup.py",
