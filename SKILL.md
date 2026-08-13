@@ -1,6 +1,6 @@
 ---
-name: paper-curation
-description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검색 → Zotero 등록 → Paper Review → 로컬 인덱스까지 단일 진입점 (pipeline/run_full.py). 트리거: '논문 큐레이션', '최신 논문 찾아줘', '논문 수집', 'paper curation', '오늘 나온 논문', '최신 논문 Zotero에', 'curate papers', '논문 모니터링'."
+name: kaic-paper-curation
+description: "kaicot 포크의 논문 자동 큐레이션 풀 파이프라인 (Paper Curation kaicot fork). PDF/주소로 논문을 Zotero에 등록하고, 리뷰·분류·검색 페이지까지 자동 생성. 트리거: '@kaic-paper-curation', '논문 큐레이션', '이 논문 넣어줘', '이 주소 논문 넣어줘', '논문 리뷰해줘', '최신 논문 찾아줘', '논문 수집', 'kaic paper curation', '오늘 나온 논문', 'curate papers', '논문 모니터링'."
 ---
 
 # Paper Curation — Dispatcher
