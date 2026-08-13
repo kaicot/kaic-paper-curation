@@ -11,6 +11,9 @@ description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검�
 파이프라인의 모든 단계는 `pipeline/api` 에서 함수로도 호출 가능
 (`from pipeline.api import curate, classify, timeline, ...`).
 생성은 **Codex saved-auth(ChatGPT 로그인)** 만 사용하며 유료 API 키로의 fallback 은 없다.
+사용자가 localhost·터미널·명령어를 몰라도 되도록, LLM이 **설치부터 매일 사용까지
+전 과정을 step-by-step으로 안내**한다. 사용자에게는 질문에 답하고 결과를
+브라우저로 보는 것만 요구한다.
 </Purpose>
 
 <Trigger_To_Mode>
@@ -35,6 +38,51 @@ description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검�
 > ⚠️ `deploy` 모드는 제거되었다 (`--mode deploy` 는 exit 2). "배포해줘" 요청에는 로컬 서버(`serve_local.py`) 열람을 안내한다.
 
 </Trigger_To_Mode>
+
+<Wizard_Installation>
+
+사용자가 "설치해줘", "이거 써보고 싶어", "github 주소" 를 언급하면 아래를 진행한다.
+**한 번에 하나씩만 묻고, 답을 기다린다.**
+
+1. 사전 확인 — `codex login status` 가 `Logged in using ChatGPT` 인지,
+   Python 3.12 인지 확인한다. 안 되면 안내하고 기다린다.
+2. Zotero 준비 — "리뷰할 논문을 Zotero의 컬렉션(폴더) 하나에 넣고, Zotero 앱에서
+   동기화를 눌러 PDF를 내려받아 주세요"라고 안내한다.
+3. 정보 수집 (하나씩) —
+   a. Zotero API 키: `ZOTERO_API_KEY` 환경변수 또는 `pipeline/tools/inspect_local_zotero.py`
+      실행 결과 `found: true` 면 키 없이 진행 가능.
+   b. 이메일
+   c. **Zotero 컬렉션 이름** — 입력 후 API/로컬 DB로 존재 여부 검증. 없으면
+      `inspect_local_zotero.py --json` 의 컬렉션 목록을 보여주고 재질문.
+   d. 토픽 alias — 영문 소문자·숫자·`-`·`_` 만 (예: `dementia2025`)
+   e. Zotero PDF 폴더 — 보통 `C:\Users\<이름>\Zotero` (자동 감지 가능)
+4. `config.json` 생성 → `doctor.py` 로 검증 → 첫 파이프라인 실행.
+5. 마무리 안내 — "브라우저에서 `http://localhost:8000/<토픽>/` 을 열면 됩니다.
+   서버가 꺼져 있으면 말씀해 주세요. 제가 켜 드릴게요."
+
+</Wizard_Installation>
+
+<Wizard_Daily_Use>
+
+사용자가 아래 같은 일상 표현을 쓰면, **터미널·localhost 개념 없이** 안내한다:
+
+| 사용자 말 | LLM 행동 |
+|---|---|
+| "새 논문 리뷰해줘", "Zotero에 있는 거 정리해줘" | topic 확인 후 `run_full curate --source zotero` 실행, 완료되면 URL 안내 |
+| "오늘/이번 주 논문 찾아줘" | `curate --source web --days 7` 실행 |
+| "분류 다시 해줘" | `run_full --mode reclassify` |
+| "타임라인 다시 만들어줘" | `run_full --mode retime` |
+| "결과 보고 싶어", "웹에서 보여줘" | `serve_local.py` 가 실행 중인지 확인. 꺼져 있으면 실행하고 `http://localhost:8000/<토픽>/` 안내 |
+| "이 논문만 다시 해줘" (슬러그 언급) | `--slugs A,B,C --mode rebuild --strict-pdf --yes` (파괴적 — 사용자 명시 확인 후) |
+| "무슨 컬렉션이 있지?", "컬렉션 목록" | `inspect_local_zotero.py --json` 실행 후 목록 표시 |
+| "몇 편이나 리뷰됐어?", "진행 상황" | `docs/papers/` 의 review.md 개수·`_papers_index.json` 확인 후 요약 |
+
+실행 후 반드시 **결과 요약과 열람 URL**을 사용자에게 알린다:
+"방금 N편의 리뷰가 완료됐습니다. 브라우저에서 `http://localhost:8000/<토픽>/` 를
+여시면 카테고리별로 보실 수 있어요." (localhost 라는 단어는 부가 설명 없이
+링크처럼 안내)
+
+</Wizard_Daily_Use>
 
 <Quick_Recipes>
 
@@ -111,5 +159,8 @@ from pipeline.api.extract import pre_validate_figure
 - [ ] `pipeline/run_full.py` 단일 진입점으로 실행 (`Bash` tool)
 - [ ] 실패 시 `--dry-run` 으로 plan 확인 후 재실행
 - [ ] 로컬 열람은 `pipeline/serve_local.py` (localhost:8000)
+- [ ] 사용자에게 결과 요약 + 열람 URL(`http://localhost:8000/<토픽>/`) 안내
+- [ ] 서버가 꺼져 있으면 자동으로 실행하고 URL 안내
+- [ ] 설치 요청이면 <Wizard_Installation> 흐름, 일상 사용이면 <Wizard_Daily_Use> 흐름 적용
 - [ ] 자세한 운영 / 환경 / 복구는 `docs/operations.md`
 </Final_Checklist>

@@ -85,6 +85,22 @@ setup.py 출력의 "다음 단계" 섹션을 사용자에게 전달한다. 특�
 - 파이프라인 실행 시간이 논문 편수에 따라 크게 달라진다는 점을 안내
 - 사용자의 topic alias가 반영된 실행 명령어를 보여준다
 
+### 일상 사용 (LLM 위자드)
+
+사용자가 localhost·터미널·명령어를 몰라도 되도록, **사용 단계도 LLM이 안내**한다.
+설치 후 사용자는 "새 논문 리뷰해줘", "웹에서 보여줘" 같은 일상 표현만 하면 된다.
+
+- **요청 → 명령 매핑**: SKILL.md의 <Wizard_Daily_Use> 표를 따른다
+  (curate zotero / curate web / reclassify / retime / 서버 열기 / 컬렉션 목록 / 진행 상황).
+- **실행 후 안내 필수**: 결과 요약 + 열람 URL(`http://localhost:8000/{topic}/`)을
+  사용자에게 알린다. 서버(`serve_local.py`)가 꺼져 있으면 자동으로 실행하고 URL을 안내한다.
+- **초보자 배려**: `localhost`가 뭔지 모르는 사용자에게는 "브라우저에서
+  `http://localhost:8000/{topic}/` 을 열면 됩니다"라고 안내하고, 필요하면
+  "여시면 카테고리별로 논문이 보입니다"처럼 설명을 붙인다.
+- **진행 상황 확인**: "몇 편 리뷰됐어?" 같은 질문에는 `docs/papers/`의
+  review.md 개수와 `_papers_index.json`을 확인해 요약한다.
+- **컬렉션 안내**: "무슨 컬렉션 있지?" → `pipeline/tools/inspect_local_zotero.py --json`.
+
 ## Architecture
 
 ### Central Data Store
