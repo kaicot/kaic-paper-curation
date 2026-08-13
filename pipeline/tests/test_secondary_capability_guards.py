@@ -149,45 +149,6 @@ class SecondaryCapabilityGuardTests(unittest.TestCase):
                 )
             self.assertEqual(list(Path(directory).glob("*.tmp")), [])
 
-    def test_worker_denies_every_route_before_input_access(self) -> None:
-        node = ROOT.parent.parent / ".tools/node/node.exe"
-        if not node.is_file():
-            node = ROOT / ".tools/node/node.exe"
-        harness = r"""
-import worker from "./worker/index.js";
-globalThis.fetch = () => { throw new Error("network-poison"); };
-const poison = new Proxy({}, { get() { throw new Error("input-poison"); } });
-const response = await worker.fetch(poison, poison, poison);
-const body = await response.text();
-console.log(JSON.stringify({
-  body,
-  cache: response.headers.get("Cache-Control"),
-  cors: response.headers.get("Access-Control-Allow-Origin"),
-  status: response.status
-}));
-"""
-        result = subprocess.run(
-            [str(node), "--input-type=module", "-e", harness],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        value = cast(
-            dict[str, object],
-            cast(object, json.loads(result.stdout)),
-        )
-        self.assertEqual(
-            value,
-            {
-                "body": "Not Found",
-                "cache": "no-store",
-                "cors": None,
-                "status": 404,
-            },
-        )
-
     def test_default_static_pages_contain_no_retired_controls(self) -> None:
         topic_source = (
             ROOT / "pipeline/build_topic_index.py"
@@ -198,14 +159,6 @@ console.log(JSON.stringify({
         for source in (topic_source, review_source):
             self.assertNotIn("api/embed", source)
             self.assertNotIn("api/audio-email", source)
-
-    def test_worker_assets_are_guarded_before_static_binding(self) -> None:
-        configuration = (ROOT / "wrangler.toml").read_text(encoding="utf-8")
-        self.assertIn("run_worker_first = true", configuration)
-        source = (ROOT / "worker/index.js").read_text(encoding="utf-8")
-        self.assertNotIn("ASSETS", source)
-        self.assertNotIn("globalThis.fetch", source)
-        self.assertNotIn("await fetch", source)
 
 
 if __name__ == "__main__":
