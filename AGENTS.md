@@ -22,6 +22,12 @@ Academic paper curation pipeline. Papers are fetched from Zotero, reviewed via l
 > ⚠️ **포크 구분**: 이 저장소는 kaicot 포크다. 설치·호출부호·스킬 이름은 반드시
 > `kaic-paper-curation` 을 사용하고, 원작(`jehyunlee/paper-curation`)의 스킬
 > 이름·설치 경로(`paper-curation`)와 혼동하지 않는다.
+>
+> 🚫 **원작과의 모든 교류 금지 (운영자 지시 2026-08-13)**: 원작 저장소
+> (`jehyunlee/paper-curation`, upstream)에 PR·이슈·기여·푸시·동기화를
+> **절대 수행하지 않는다.** upstream remote 는 조회용으로만 남겨두고,
+> fetch/pull/merge/push 는 하지 않는다. 이 포크는 kaicot 저장소로 독립
+> 운영한다.
 
 ### Step 1: Clone & Dependencies
 ```bash
