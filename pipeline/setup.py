@@ -192,7 +192,7 @@ def resolve_zotero_identifiers(
 
 
 def _skill_destination(profile: Path) -> Path:
-    destination = profile / ".codex" / "skills" / "paper-curation"
+    destination = profile / ".codex" / "skills" / "kaic-paper-curation"
     resolved_parent = destination.parent.resolve()
     try:
         _ = resolved_parent.relative_to(profile.resolve())
@@ -225,7 +225,7 @@ def install_skill(
     stage = Path(
         tempfile.mkdtemp(
             dir=parent,
-            prefix=".paper-curation-stage-",
+            prefix=".kaic-paper-curation-stage-",
         )
     )
     backup: Path | None = None
@@ -234,7 +234,7 @@ def install_skill(
         _ = staged_skill.write_bytes(shipped.read_bytes())
         if destination.exists():
             backup = parent / (
-                ".paper-curation-backup-" + uuid.uuid4().hex
+                ".kaic-paper-curation-backup-" + uuid.uuid4().hex
             )
             os.replace(destination, backup)
         try:
