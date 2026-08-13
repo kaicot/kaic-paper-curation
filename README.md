@@ -86,6 +86,33 @@ Zotero 컬렉션 + PDF만 있으면 됩니다. **유료 API 키(Anthropic/OpenAI
 
 > "여기에 paper-curation을 설치해줘: https://github.com/jehyunlee/paper-curation"
 
+#### 🤖 LLM(Codex)이 위자드처럼 안내하는 설치 흐름
+
+사용자가 위 문장만 입력하면, LLM은 아래 **step-by-step**으로 필요한 정보를 하나씩
+요청하고, 답변이 오면 자동으로 진행합니다. 사용자는 질문에 답만 하면 됩니다.
+
+1. **사전 확인** — Codex 로그인(`codex login status` → `Logged in using ChatGPT`)과
+   Python 3.12 환경이 준비됐는지 확인합니다.
+2. **Zotero 준비 안내** — 아래를 차례로 설명하고 준비되면 진행합니다:
+   - [Zotero API 키 발급](https://www.zotero.org/settings/keys) (읽기 전용 권한이면 충분)
+   - Zotero 앱에서 리뷰할 논문들을 **컬렉션(폴더)** 하나에 넣기
+   - Zotero에서 해당 컬렉션의 **PDF가 로컬에 내려받아졌는지** 확인 (동기화 필요)
+3. **정보 요청** — 한 번에 하나씩만 묻습니다:
+   - "Zotero API 키를 알려주세요" (또는 `ZOTERO_API_KEY` 환경변수 확인)
+   - "이메일을 알려주세요 (Zotero/Unpaywall용)"
+   - "리뷰할 논문이 들어있는 **Zotero 컬렉션 이름**이 뭔가요?"
+   - "이 컬렉션을 앞으로 뭐라고 부를까요? (영문 짧은 이름, 예: `dementia2025`)"
+   - "Zotero PDF 저장 폴더 경로를 알려주세요" (예: `C:\Users\<이름>\Zotero`)
+4. **컬렉션 확인** — 입력한 컬렉션 이름이 Zotero에 없으면 **사용 가능한 컬렉션 목록**을
+   보여주고 다시 물어봅니다.
+5. **설치·실행** — `config.json` 생성 → 연결 테스트 → 첫 파이프라인 실행 → 결과 확인
+   (`serve_local.py`로 `http://localhost:8000/{토픽}/` 열람 안내).
+
+> 💡 **API 키가 없어도 되는 경우**: Zotero 앱이 이미 이 PC에 설치되어 있고
+> `C:\Users\<사용자이름>\Zotero\zotero.sqlite` 파일이 있다면, LLM은 그 로컬 DB에서
+> 컬렉션 목록·PDF 위치를 직접 읽을 수 있습니다. 이 경우 API 키 없이도 진행 가능합니다
+> (아래 "API 키 없이 시작하기" 참고).
+
 **수동 설치:**
 
 ```bash
@@ -117,6 +144,23 @@ PYTHONUTF8=1 python pipeline/doctor.py --format json
 ```
 
 사전 준비 체크리스트, config.json 스키마, 설치 확인, 문제 해결 → **[Setup Guide](docs/setup-guide.md)**
+
+#### 🚫 API 키 없이 시작하기 (Zotero 초보·키 발급이 어려운 경우)
+
+Zotero 앱이 이미 이 PC에 설치되어 있다면 **API 키 없이** 바로 시작할 수 있습니다.
+Zotero는 로컬에 `zotero.sqlite`(데이터 DB)와 `storage/`(PDF)를 보관합니다.
+
+1. **Zotero 데이터 폴더 찾기**: 보통 `C:\Users\<사용자이름>\Zotero` 입니다.
+   (Zotero 앱 → 설정 → 고급 → 파일 및 폴더에서 확인 가능)
+2. **LLM에게 알려주기**: "Zotero 데이터 폴더는 `C:\Users\<이름>\Zotero` 입니다" 라고
+   하면, LLM이 로컬 DB(`zotero.sqlite`)와 `storage/`를 읽어 **컬렉션 목록과 PDF
+   동기화 상태를 직접 확인**합니다. (수동 확인: `python pipeline/tools/inspect_local_zotero.py --json`)
+3. 이후 동일하게 "어느 컬렉션을 큐레이션할까요?" 질문에 답하면 됩니다.
+
+> ⚠️ **주의**: API 키가 없으면 Zotero 웹 라이브러리 접근은 못 하지만, 로컬에
+> 내려받은 PDF와 컬렉션 정보로는 충분히 파이프라인을 돌릴 수 있습니다. 다만
+> **컬렉션의 PDF가 로컬에 없으면** 리뷰를 만들 수 없으므로, Zotero 앱에서
+> 동기화를 눌러 PDF를 내려받아야 합니다.
 
 ## 💳 크레딧 가이드
 

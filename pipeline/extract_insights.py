@@ -102,7 +102,7 @@ def extract_paper_connections(
     target_slugs = {
         paper["slug"]
         for category, papers in category_papers.items()
-        if category != "Other" and len(papers) >= 3
+        if category != "Other"
         for paper in papers
     }
     if not target_slugs:

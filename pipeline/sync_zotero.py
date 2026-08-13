@@ -20,10 +20,20 @@ import urllib.request
 import urllib.parse
 from datetime import datetime
 
-from config_loader import PAPERS_DIR as _PAPERS_DIR
-PAPERS_DIR = str(_PAPERS_DIR)
+import sys
+from pathlib import Path
 
-from config_loader import get_zotero_api_key, get_zotero_user_id, get_collections, _ssl_ctx
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from pipeline.config_loader import (  # noqa: E402
+    PAPERS_DIR,
+    get_collections,
+    get_zotero_api_key,
+    get_zotero_user_id,
+    _ssl_ctx,
+)
 
 API_KEY = get_zotero_api_key()
 USER_ID = get_zotero_user_id()
@@ -140,8 +150,12 @@ def _run_sync(topic, *, dry_run=False, force_delete=False):
         return
 
     index_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-    with open(index_path, "r", encoding="utf-8") as f:
-        papers = json.load(f)
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            papers = json.load(f)
+    else:
+        log(f"Index not found: {index_path} — skipping sync (first run)")
+        papers = []
 
     # Fetch Zotero
     log(f"Fetching Zotero collection '{topic}' ({collection_key})...")

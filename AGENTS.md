@@ -27,14 +27,35 @@ pip install anthropic google-genai pymupdf Pillow requests opendataloader-pdf
 
 ### Step 2: config.json 생성
 사용자에게 아래 정보를 **하나씩 질문**하고 config.json을 생성한다:
-1. **Zotero API Key** — 환경변수 `ZOTERO_API_KEY`가 있으면 자동 사용, 없으면 질문
-2. **이메일** — Zotero/Unpaywall용
-3. **Zotero 컬렉션 이름** — "Zotero에서 큐레이션할 컬렉션 이름이 뭔가요?"
-4. **Topic alias** — "앞으로 이 Collection의 Paper Curation을 운영하려면 부르기 편한 이름을 하나 정하는 게 좋습니다. 짧은 이름을 하나 지어주세요. 뭐라고 부를까요?" (예: `bioml`, `climate`)
-5. **Zotero PDF 저장 경로**
-6. **PaperBanana 경로** — "PaperBanana가 이미 설치된 경로가 있으면 알려주세요. 없으면 자동으로 클론합니다." (없으면 생략, setup.py가 자동 클론)
+
+**위자드 원칙**: 한 번에 하나씩만 묻고, 답변을 기다린 뒤 다음으로 넘어간다. 사용자가
+몰라서 막히면 짧게 설명하고 준비를 기다린다. 컬렉션 이름을 받으면 **Zotero API로
+존재 여부를 즉시 검증**하고, 없으면 사용 가능한 컬렉션 목록을 보여주고 다시 묻는다.
+
+1. **Zotero API Key** — 환경변수 `ZOTERO_API_KEY`가 있으면 자동 사용, 없으면 질문.
+   **단, 로컬 Zotero 데이터 폴더(`zotero.sqlite` 존재)가 확인되면 API 키 없이도
+   진행 가능**: `python pipeline/tools/inspect_local_zotero.py --json` 으로 로컬 DB에서
+   컬렉션 목록과 PDF 동기화 상태를 읽어 안내한다. 이 경우 Step 2의 컬렉션 질문은
+   "Zotero 앱의 컬렉션(폴더) 이름"을 그대로 받고, PDF 경로는 `storage/`가 있는
+   데이터 폴더로 지정한다. `total_local_pdfs`가 0이면 "Zotero 앱에서 동기화를 눌러
+   PDF를 내려받으세요"라고 안내한다.
+2. **이메일** — Zotero/Unpaywall용 (자리표시자 허용, 없으면 빈 값으로 진행 가능)
+3. **Zotero 컬렉션 이름** — "리뷰할 논문들이 들어있는 Zotero 컬렉션 이름이 뭔가요?"
+   (Zotero 앱 왼쪽 목록의 이름. 여러 컬렉션을 쓰려면 이후 언제든 config.json의
+   `zotero.collections`에 한 줄씩 추가하면 된다)
+4. **Topic alias** — "이 컬렉션을 앞으로 뭐라고 부를까요? 영문 짧은 이름으로
+   하나 지어주세요 (예: `dementia2025`, `bioml`)." **규칙: 영문 소문자·숫자·`-`·`_`
+   만 허용.** 한글 컬렉션 이름이어도 alias는 영문으로 만든다.
+5. **Zotero PDF 저장 경로** — 로컬 PC의 실제 폴더 (예: `C:\Users\<이름>\Zotero`).
+   컬렉션의 PDF가 이 폴더 `storage/` 아래에 내려받아져 있어야 한다.
+6. **PaperBanana 경로** — "PaperBanana가 이미 설치된 경로가 있으면 알려주세요.
+   없으면 자동으로 클론합니다." (없으면 생략, setup.py가 자동 클론)
 7. **GitHub 설정** — 선택사항 (정적 호스팅 자동 배포용), 없으면 생략
 8. **Codex saved-auth (필수)** — 모든 생성(리뷰·분류 보조·요약·연결·타임라인)은 저장된 ChatGPT Codex 로그인(`codex login status` → `Logged in using ChatGPT`)으로 동작한다. `GOOGLE_API_KEY` 는 **선택** — dense 검색 임베딩(`build_search_index.py --with-dense`)·Figure 검증·TTS 에만 쓰이고, 없어도 BM25 기본 인덱스로 설치·운영이 진행된다. `OPENAI_API_KEY` 는 **선택** — 독자 BYOK 답변 에만 쓰인다.
+
+**컬렉션 PDF 확인**: config 생성 전에 "해당 컬렉션의 PDF가 로컬에 내려받아졌는지"
+확인한다. `find_pdf()`는 로컬 `storage/`만 읽으므로, PDF가 없으면 리뷰를 만들 수 없다.
+사용자에게 "Zotero 앱에서 동기화를 눌러 PDF를 내려받으세요"라고 안내한다.
 
 ### Step 3: setup.py 실행 및 검증
 ```bash paper-curation-command
