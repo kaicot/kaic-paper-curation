@@ -325,12 +325,33 @@ def _validate_classification(
     payload = cast(dict[str, object], value)
     assignments = payload.get("assignments")
     categories = payload.get("categories")
-    if (
-        not isinstance(assignments, dict)
-        or not isinstance(categories, list)
-        or not categories
-        or not selected_slugs.issubset(cast(dict[str, object], assignments))
-    ):
+    if not isinstance(categories, list) or not categories:
+        raise ArtifactValidationError(
+            "classification",
+            "classification-schema-invalid",
+            path,
+        )
+    assigned_slugs: set[str] = set()
+    if isinstance(assignments, dict):
+        assigned_slugs = set(cast(dict[str, object], assignments))
+    elif isinstance(assignments, list):
+        for row in cast(list[object], assignments):
+            if not isinstance(row, dict):
+                raise ArtifactValidationError(
+                    "classification",
+                    "classification-schema-invalid",
+                    path,
+                )
+            slug = cast(dict[str, object], row).get("slug")
+            if isinstance(slug, str):
+                assigned_slugs.add(slug)
+    else:
+        raise ArtifactValidationError(
+            "classification",
+            "classification-schema-invalid",
+            path,
+        )
+    if not selected_slugs.issubset(assigned_slugs):
         raise ArtifactValidationError(
             "classification",
             "classification-schema-invalid",
@@ -501,7 +522,11 @@ def validate_default_artifacts(
         root = ET.fromstring(_read_text(feed, "rss"))
     except ET.ParseError as error:
         raise ArtifactValidationError("rss", "rss-xml-invalid", feed) from error
-    if root.tag != "rss" or root.find("channel") is None:
+    local_name = root.tag.rsplit("}", 1)[-1]
+    if not (
+        (local_name == "rss" and root.find("channel") is not None)
+        or (local_name == "feed" and root.find("{http://www.w3.org/2005/Atom}entry") is not None)
+    ):
         raise ArtifactValidationError("rss", "rss-schema-invalid", feed)
     result.append(_rows("rss", [feed], docs))
 

@@ -10,8 +10,13 @@ Usage:
 import os, re, sys, json, argparse
 from html import escape as esc
 from urllib.parse import quote as _urlquote
+from pathlib import Path
 
-from config_loader import PAPERS_DIR as _PAPERS_DIR
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from pipeline.config_loader import PAPERS_DIR as _PAPERS_DIR  # noqa: E402
 PAPERS = str(_PAPERS_DIR)
 
 # Zotero PDF attachment keys (slug → key). Written by build_topic_index;
@@ -41,7 +46,7 @@ _connections_cache = {}
 
 _BSI = None
 
-from lib import license_util as _lic
+from pipeline.lib import license_util as _lic
 
 _DEPLOY_TOPICS = None
 def _deploy_topics():

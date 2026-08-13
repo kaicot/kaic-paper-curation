@@ -14,11 +14,18 @@ import os
 import re
 import sys
 
-from config_loader import PAPERS_DIR as _PAPERS_DIR, get_papers_index_path
+import sys
+from pathlib import Path
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from pipeline.config_loader import PAPERS_DIR as _PAPERS_DIR, get_papers_index_path  # noqa: E402
 PAPERS_DIR = str(_PAPERS_DIR)
 
 
-from lib.dateutil import normalize_date as normalize_date_to_yyyymm
+from pipeline.lib.dateutil import normalize_date as normalize_date_to_yyyymm  # noqa: E402
 
 
 _CITATION_KEYS = ("citation_count", "citations_source", "citations_asof",
@@ -64,7 +71,7 @@ def _text_md_sha256(slug):
     try:
         import hashlib
         with open(text_path, "rb") as tf:
-            return hashlib.sha256(tf.read()).hexdigest()[:16]
+            return hashlib.sha256(tf.read()).hexdigest()
     except Exception:
         return ""
 
@@ -151,7 +158,7 @@ def parse_review(slug):
         try:
             import hashlib
             with open(text_path, "rb") as tf:
-                text_md_sha256 = hashlib.sha256(tf.read()).hexdigest()[:16]
+                text_md_sha256 = hashlib.sha256(tf.read()).hexdigest()
         except Exception:
             pass
 
@@ -263,6 +270,6 @@ def main():
 
 
 if __name__ == "__main__":
-    from _env_guard import force_py312
+    from pipeline._env_guard import force_py312
     force_py312()
     main()

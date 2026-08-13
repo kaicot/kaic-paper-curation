@@ -308,7 +308,7 @@ def save_checkpoint(cp):
     # old complete file rather than a half-written one. _cp_lock still
     # serializes concurrent writers AND the json serialization (callers may
     # append to cp['completed'] from other threads).
-    from lib.atomic_io import atomic_write_json
+    from pipeline.lib.atomic_io import atomic_write_json
     with _cp_lock:
         atomic_write_json(CHECKPOINT_FILE, cp)
 
@@ -413,7 +413,7 @@ def find_pdf(item):
                 continue
             if cd.get("contentType") not in ("application/pdf", ""):
                 continue
-            path = cd.get("path", "")
+            path = cd.get("path", "") or cd.get("filename", "")
             if not path.lower().endswith(".pdf"):
                 continue
             # Zotero "Linked Attachment Base Directory" stores paths as
@@ -427,7 +427,7 @@ def find_pdf(item):
                                    "method": "zotero_children_attachments_uri",
                                    "path": resolved})
                     return resolved, "zotero_children_abs"
-            if os.path.exists(path):
+            if path and os.path.exists(path):
                 _audit_append({"key": key, "title": title[:80],
                                "method": "zotero_children_abs", "path": path})
                 return path, "zotero_children_abs"
@@ -440,11 +440,14 @@ def find_pdf(item):
             # filename and never resolve it. Normalise to forward slashes
             # first so the basename works on either separator.
             fname = path.replace("\\", "/").rsplit("/", 1)[-1]
-            alt = os.path.join(ZOTERO_DIR, fname)
-            if os.path.exists(alt):
-                _audit_append({"key": key, "title": title[:80],
-                               "method": "zotero_children_basename", "path": alt})
-                return alt, "zotero_children_basename"
+            for alt in (
+                os.path.join(ZOTERO_DIR, fname),
+                os.path.join(ZOTERO_DIR, "storage", cd.get("key", ""), fname),
+            ):
+                if os.path.exists(alt):
+                    _audit_append({"key": key, "title": title[:80],
+                                   "method": "zotero_children_basename", "path": alt})
+                    return alt, "zotero_children_basename"
     except Exception as e:
         _audit_append({"key": key, "title": title[:80],
                        "method": "children_api_error", "error": str(e)[:200]})
@@ -1123,7 +1126,11 @@ def extract_figures(pdf_path, slug_dir):
 
 # ── Phase 4: Write review.md (Claude Haiku → JSON → Template) ──
 
-REVIEW_TEMPLATE = """# {title}
+REVIEW_TEMPLATE = """---
+schema_version: v1
+---
+
+# {title}
 
 > **저자**: {authors} | **날짜**: {date} | {ref_label}: {ref_link}
 
@@ -2187,7 +2194,8 @@ def main(argv: list[str] | None = None) -> int:
     items = fetch_zotero_items(collection_key)
     log(f"Total papers: {len(items)}")
 
-    # Get existing slugs
+    # Get existing slugs (create papers root on first run)
+    os.makedirs(PAPERS_DIR, exist_ok=True)
     existing_slugs = sorted(d for d in os.listdir(PAPERS_DIR)
                             if os.path.isdir(os.path.join(PAPERS_DIR, d)) and d[0].isdigit())
 
@@ -2339,7 +2347,7 @@ def main(argv: list[str] | None = None) -> int:
     # build_papers_index will preserve `zotero_item_key` and `pdf_path` via prev.get(...).
     if _slug_to_zotero_key or _slug_to_pdf_path:
         try:
-            from lib.atomic_io import atomic_write_json
+            from pipeline.lib.atomic_io import atomic_write_json
             idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
             if os.path.exists(idx_path):
                 with open(idx_path, "r", encoding="utf-8") as f:
@@ -2438,10 +2446,19 @@ def main(argv: list[str] | None = None) -> int:
 
         def run_safe_stage(stage):
             if not stage.argv:
-                if resuming_safe_run:
-                    raise RuntimeError(
-                        f"in-process artifact changed before resume: {stage.name}"
-                    )
+                if resuming_safe_run and stage.name in {"review", "geometry"}:
+                    missing = [
+                        output
+                        for output in stage.outputs
+                        if not (Path(PROJECT_ROOT) / output).is_file()
+                    ]
+                    if missing:
+                        raise RuntimeError(
+                            f"in-process artifact changed before resume: "
+                            f"{stage.name} (missing {missing[0]})"
+                        )
+                    log(f"  [{stage.name}] REUSED: validated in-process artifact")
+                    return
                 log(f"  [{stage.name}] REUSED: validated in-process artifact")
                 return
             if stage.name == "bm25":

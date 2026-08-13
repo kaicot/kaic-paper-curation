@@ -18,6 +18,11 @@ Paper Curation 파이프라인의 설치 및 설정 가이드입니다.
   ```
 - **Java Runtime** — `opendataloader-pdf` 가 Java CLI 래퍼. macOS: `brew install --cask temurin`. 없으면 PyMuPDF 로 자동 fallback (표/구조 추출 품질 ↓).
 
+> 💡 **API 키 없이 시작하기 (Zotero 초보 추천)**: Zotero 앱이 이미 이 PC에 설치되어
+> 있고 로컬 데이터 폴더(`C:\Users\<이름>\Zotero\zotero.sqlite`)가 있다면 API 키 발급
+> 없이도 시작할 수 있습니다. LLM(Codex)이 로컬 DB에서 컬렉션 목록과 PDF 위치를 직접
+> 읽어 안내합니다. 자세한 흐름은 README의 "API 키 없이 시작하기" 참고.
+
 > ⚠️ **API 키 불필요**: `ANTHROPIC_API_KEY`·`GOOGLE_API_KEY`·`OPENAI_API_KEY`·`RESEND_API_KEY` 는 설치·운영에 **필요 없습니다**. 생성은 저장된 Codex saved-auth(ChatGPT 로그인)만 사용하며, 유료 API 키로의 fallback 은 `allow_paid_api: false` 로 영구 거부됩니다. 검색 인덱스는 로컬 BM25가 기본이라 임베딩 키도 필요 없습니다.
 
 > ⚠️ **Windows 첫 실행**: 모든 파이프라인 명령은 `PYTHONUTF8=1` 접두사가 필요합니다(cp949 회피). Python **3.12 단독** 지원 — 다른 인터프리터로 실행하면 `_env_guard` 가 자동으로 py312로 재실행합니다. Windows Smart App Control(WDAC) 환경에서는 콘다 env 경로를 `PAPER_CURATION_PY312` 로 지정할 수 있습니다.

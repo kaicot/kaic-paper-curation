@@ -142,6 +142,10 @@ def prepare_specter2(
         adapter_source = adapter_snapshot / "proximity"
         if not (base_snapshot / "config.json").is_file():
             raise ModelPreparationError("downloaded base snapshot lacks config.json")
+        if not adapter_source.is_dir():
+            # HF snapshot layout for the proximity adapter changed: the
+            # adapter files live at the repo root, not under a proximity/ dir.
+            adapter_source = adapter_snapshot
         if not (adapter_source / "adapter_config.json").is_file():
             raise ModelPreparationError(
                 "downloaded adapter snapshot lacks proximity/adapter_config.json"
