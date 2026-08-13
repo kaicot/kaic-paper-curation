@@ -1,385 +1,115 @@
-# Paper-Curation Operations Manual
+# kaic-paper-curation — Operations Manual (포크 기준)
 
-Detailed recipes, concurrency tuning, and recovery flows for the
-paper-curation pipeline. The trigger-side dispatcher lives in
-`SKILL.md` — this file is the operator's reference.
+이 문서는 **kaicot 포크**에서 파이프라인을 운영하는 방법을 설명한다.
+원작(jehyunlee)의 배포·BYOK·dense 검색 등은 이 포크에 없다.
 
-## Pipeline overview
+## 파이프라인 개요
 
-Single orchestrator: `pipeline/run_full.py` (3 axes — `--mode`,
-`--source`, `--images`). Individual scripts under `pipeline/*.py` are
-also importable as functions from `pipeline.api`:
+`run_full.py` 가 단일 진입점이다. 3축:
 
-```python
-from pipeline.api import (
-    search, register, sync, dedup_zotero,
-    curate, classify, topic_model, category_summary, insights,
-    timeline, network, search_index, topic_index, review_to_html,
-    deploy, validate, audit_matching, fix_matching, cleanup,
-)
+- `--mode`: `curate`(기본) / `reclassify` / `retime` / `audit` / `fix-matching` / `dedup` / `validate`
+- `--source`: `zotero`(기본) / `web` / `fixture`
+- `--images`: `skip`(기본) / `changed` / `all`
+
+`--mode deploy` 는 **제거됨** (exit 2). "배포" 는 로컬 서버(`serve_local.py`) 열람을 의미한다.
+
+## 주요 명령
+
+```bash paper-curation-command
+# 매일 — Zotero 컬렉션 신규 논문 리뷰
+PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode curate --source zotero
+
+# 웹 검색 + Zotero 등록 + 리뷰 (이번 주 논문)
+PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode curate --source web --days 7
+
+# 분류만 다시
+PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode reclassify
+
+# 타임라인만 다시
+PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode retime --images all
+
+# 실행 계획 미리보기 (변경 없음)
+PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode curate --dry-run
+
+# 결과 보기
+PYTHONUTF8=1 python pipeline/serve_local.py   # http://localhost:8000/<토픽>/
+
+# PDF/URL로 Zotero 등록 (컬렉션 자동 생성 + curation)
+PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --pdf paper.pdf --collection "내 논문"
+PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --url https://arxiv.org/abs/2401.00001 --collection "내 논문"
+
+# 로컬 Zotero 확인 (API 키 없이)
+PYTHONUTF8=1 python pipeline/tools/inspect_local_zotero.py
 ```
 
-## Modes (run_full.py)
+## 안전 플래그
 
-| Mode | Default `--source` | Default `--images` | Purpose |
-|------|--------------------|---------------------|---------|
-| `curate` | `zotero` | `skip` | Pick up new papers; reuse existing reviews |
-| `rebuild` | `zotero` | `all` | Regenerate everything (destructive — review.md/figures wiped) |
-| `reclassify` | (none) | `changed` | Re-run topic_modeling + classify only |
-| `retime` | (none) | `all` | Regenerate timeline narrative + images |
-| `deploy` | (none) | `skip` | wrangler deploy + gh-pages sync + master push |
-| `audit` | — | — | Standalone: PDF↔review mismatch audit |
-| `fix-matching` | — | — | Standalone: delete artifacts for audit-flagged slugs |
-| `dedup` | — | — | Standalone: Zotero collection dedup |
-| `validate` | — | — | Standalone: post-build validation gate |
+| 플래그 | 효과 |
+|---|---|
+| `--strict-pdf` | fuzzy 매칭 차단, ID(DOI/arXiv)로만 PDF 매칭 |
+| `--slugs A,B,C` | 특정 논문만 처리 |
+| `--dry-run` | 실행 계획만 출력 (변경 0) |
+| `--skip-dedup` / `--dedup-execute` | Zotero 중복 검사 제어 |
+| `--insights` | 크로스카테고리 인사이트 생성 (opt-in) |
+| `--llm-mode off` | 결정론 단계만 (Codex 생성 거부, exit 3) |
 
-`--source web` adds search + register + sync as a preflight to `curate`.
+## Python 환경
 
-## Common Commands
+- **Python 3.12 단독**. py314 는 numba 호환 문제로 금지 — `_env_guard` 가 자동 라우팅.
+- Windows: 모든 명령에 `PYTHONUTF8=1`.
+- SPECTER2 모델 캐시: `.cache/` (없으면 `prepare_local_models.py --specter2` 로 준비).
+
+## 한국 망 우회
+
+SPECTER2 다운로드가 한국 ISP에서 막히면:
 
 ```bash
-# Weekly run — web search + Zotero register + new-paper review
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source web --days 7
-
-# Local-only update (Zotero already has new papers)
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source zotero
-
-# Force-rebuild specific slugs (recovery)
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode rebuild --slugs 088,1093 --strict-pdf
-
-# Reclassify only (no LLM, HDBSCAN approximate_predict)
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode reclassify
-
-# Timeline narrative + images
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode retime --images all
-
-# Deploy
-PYTHONUTF8=1 python pipeline/run_full.py --topic humanoid --mode deploy
-
-# Dry-run (no execution)
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source web --dry-run
-
-# Citedby — PDF-first index + default timeline/narrative + localhost open
-PYTHONUTF8=1 python pipeline/run_citedby.py \
-  --doi 10.xxxx/xxxxx --slug 042_Some_Paper \
-  --pdf-first --build-index --serve --open
+mkdir -p .cache && cd .cache
+curl -L -o specter2_0.tar.gz "https://ai2-s2-research-public.s3.amazonaws.com/specter2_0/specter2_0.tar.gz"
+tar -xzf specter2_0.tar.gz   # base/ + adapters/
 ```
 
-## Safety flags
+arXiv 429 가 잦으면 `search_papers.py --skip-arxiv` (OpenAlex+S2 만).
 
-- `--strict-pdf` — block fuzzy PDF matching; ID (Zotero/DOI/arXiv) only
-- `--slugs A,B,C` — restrict to specific slug prefixes
-- `--dry-run` — print plan, no execution
-- `--skip-dedup` / `--dedup-execute` — control Zotero dedup preflight
-- `--yes` — bypass `--mode rebuild` confirmation gate
+## Schema v1 frontmatter
 
-## Concurrency (Anthropic Tier 4 default)
+모든 `review.md` 는 `---` + `schema_version: v1` frontmatter 를 가진다.
+없으면 검증(`validate_default_artifacts`)이 실패한다. 생성 템플릿이 자동 포함.
 
-`run_full.py --concurrency` and `run_update_force.py --concurrency`
-control per-paper review parallelism. Default 16 (Tier 4). Lower
-tiers should drop:
+## 캐시·재개
 
-| Tier | Recommended |
-|------|-------------|
-| Free / 1 | 2–4 |
-| 2 | 6–8 |
-| 3 | 10–12 |
-| **4** | **16–20** |
+- 각 단계는 상태 파일(`pipeline/_safe_update_state/`)로 추적된다.
+- 실패 시 이전 단계 해시 보존, `--resume` 으로 실패 단계부터 재실행.
+- LLM 생성은 `.llm_cache` 로 캐시 — 동일 입력이면 재호출 없음.
 
-Phase 2 added per-category parallelism for the post-review phase:
-- `CAT_SUMMARY_PARALLEL` (default 8) — Haiku per-category summaries
-- `TIMELINE_NARRATIVE_PARALLEL` (default 8) — Opus per-category narratives
-- `TIMELINE_IMAGE_PARALLEL` (default 4) — PaperBanana per-category images
-- `EXTRACT_INSIGHTS_PARALLEL` (default 4) — Sonnet per-category paper_connections
+## Citedby (선택)
 
-Wall-clock for finalize phase: ~25 min → ~6 min at Tier 4.
-
-## Python environment
-
-**Standard: single conda env `py312` (Python 3.12).** `requirements.txt`
-includes the clustering stack (umap-learn / hdbscan / sentence-transformers),
-so topic modeling/classification runs in-process — no subprocess routing.
-
-```bash
-conda create -n py312 -c conda-forge python=3.12 pip -y
-conda activate py312
-pip install -r requirements.txt
-brew install --cask temurin   # Java for opendataloader-pdf
+```bash paper-curation-command
+PYTHONUTF8=1 python pipeline/run_citedby.py --doi 10.xxxx/xxxxx --pdf-first --build-index --serve --open
 ```
 
-## Korean network workarounds
+DOI 하나에서 인용 계보·타임라인·Deep(er) Research 를 로컬 HTML 로 생성한다.
 
-- **HuggingFace LFS blocked**: download SPECTER2 via AWS S3 mirror to
-  `.cache/base/`, then `topic_modeling.py` auto-detects:
+## 검색 품질 회귀 테스트
 
-  ```bash
-  mkdir -p .cache && cd .cache
-  curl -L -o specter2_0.tar.gz \
-       "https://ai2-s2-research-public.s3.amazonaws.com/specter2_0/specter2_0.tar.gz"
-  tar -xzf specter2_0.tar.gz
-  ```
-
-- **arXiv chronic 429**: `search_papers.py --skip-arxiv` (OpenAlex + S2 only)
-- **OpenDataLoader fallback**: PyMuPDF takes over silently; install
-  Temurin Java to get pdffigures2 structure
-- **Anthropic stale connections (half-open sockets)**: the Related-Papers
-  connection step defends itself automatically — multi-round retry (only
-  stuck batches), zero-connection-papers-first ordering, and unfinished
-  papers keep their previous connections (self-heals next cycle). If a
-  local model is available, `--local-fallback` completes the remainder
-  on the spot (measured: EXAONE-4.0-32B, ~32 s per 8-paper batch):
-
-  ```bash
-  # config.json — add a local_model block (Ollama example)
-  #   "local_model": {
-  #     "base_url": "http://localhost:11434/v1",
-  #     "model": "exaone-4.0:latest",
-  #     "num_ctx": 8192, "retries": 2, "batch_size": 8
-  #   }
-  PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source zotero --local-fallback
-  ```
-
-  Ollama is auto-detected (native API: per-request `num_ctx`, `think:false`);
-  LM Studio/llama.cpp/vLLM use the OpenAI-compatible path. A dead endpoint
-  is skipped silently — the pipeline never blocks on it.
-
-## Schema v1 frontmatter (Phase 3)
-
-Every `docs/papers/{slug}/review.md` carries YAML frontmatter
-populated by `inject_frontmatter.py`. Readers prefer frontmatter over
-body-regex parsing when `schema_version: v1` is present.
-
-```yaml
----
-title: "<full paper title>"
-authors: ["First Last", ...]
-date: "2021-07-15"
-doi: "..."
-primary_topic: ai4s
-primary_category: "..."
-all_categories: [...]
-sub_categories: {"Category": "Sub-category", ...}
-sub_category: "..."
-scores:
-  novelty: 5
-  technical: 5
-  significance: 5
-  clarity: 4
-  overall: 5
-score: 5
-essence: "..."
-tags: [paper, ai4s, "ai4s/category-slug/sub-slug", ...]
-schema_version: v1
----
-```
-
-Migration script: `pipeline/_archive/migrate_to_toolschema.py` (one-time, now archived). Originals are
-preserved at `docs/papers/.legacy/{slug}_v0.md`. Re-running the
-migration is idempotent (existing backups are kept).
-
-## LLM tool-use + cache
-
-Phase 3 migrated `write_review` and `extract_insights.cross_category`
-to Anthropic tool-use schemas. Responses are forced into the schema
-shape; the SDK retries on mismatch. Post-hoc fixers
-(`fix_python_list_literals`, `fix_figure_paths`, `fix_evaluation_format`,
-`validate_review_format`) are no longer invoked.
-
-Each tool-use call is wrapped in `api._llm.cached_call` keyed on
-`sha256(prompt || model || schema_version)`. Cache layout:
-
-```
-docs/papers/{slug}/.llm_cache/{hash}.json     # per-paper (write_review)
-docs/{topic}/.llm_cache/{hash}.json           # per-topic (insights)
-```
-
-A re-run of `--mode rebuild` on an unchanged paper costs zero LLM
-calls. Pass `force=True` to `cached_call` to bypass.
-
-## Figure pre-validator (Phase 4)
-
-`api.extract.pre_validate_figure(png_path)` runs before each Gemini
-figure validation call. Heuristics: file size, dimensions, grayscale
-variance. Skips ~30% of Gemini calls on obviously-invalid crops while
-deferring borderline cases to the LLM.
-
-## Retrieval quality regression
-
-The tracked `pipeline/eval/retrieval_queries.jsonl` corpus contains five fixed
-queries for each of the eight current collections. Evaluation reads only the
-versioned sparse-index-v2 artifacts and runs deterministic local BM25 ranking.
-No query-vector file, embedding sidecar, API key, or network request is used.
-
-```bash
-# Record the first lexical baseline after all sparse indexes are rebuilt
+```bash paper-curation-command
 python pipeline/evaluate_retrieval.py \
   --queries pipeline/eval/retrieval_queries.jsonl \
+  --vectors pipeline/eval/retrieval_query_vectors.json \
   --all --baseline pipeline/eval/retrieval_baseline.json \
-  --record-baseline --min-recall-at-5 0 \
-  --output pipeline/eval/results/bm25-bootstrap.json
-
-# Run all collections and reject recall@5 regressions beyond 0.025
-python pipeline/evaluate_retrieval.py \
-  --queries pipeline/eval/retrieval_queries.jsonl \
-  --all --baseline pipeline/eval/retrieval_baseline.json \
-  --min-recall-at-5 0 --strict \
-  --output pipeline/eval/results/latest.json \
-  --failures pipeline/eval/results/failures.json
-
-# Install the same test on macOS (Sunday 03:17)
-scripts/install-retrieval-eval-launchd.sh
-```
-The installer mirrors only evaluator runtime, tracked corpus, sparse indexes,
-and their exact paper-index/review source manifests to
-`~/Library/Application Support/paper-curation/retrieval-eval/`. macOS
-LaunchAgents cannot read a repository under `Documents` without TCC approval,
-so the scheduled job evaluates this atomic snapshot and writes reports under
-`~/Library/Logs/paper-curation/`. Successful orchestrated index rebuilds refresh
-the snapshot automatically when the LaunchAgent is installed.
-
-After sparse topic and `_cross` rebuilds, the installed local snapshot is
-refreshed before its next scheduled evaluation. The bootstrap labels are BM25 top-1
-known-item targets, not exhaustive relevance judgments; therefore the active
-gate detects regression from the tracked baseline rather than claiming a
-0.95 absolute floor. Review observed failures before adding them to the query
-set. After changing query bytes, rebuild the affected sparse indexes and record
-a new measured lexical baseline explicitly:
-
-```bash
-python pipeline/evaluate_retrieval.py \
-  --queries pipeline/eval/retrieval_queries.jsonl \
-  --all --baseline pipeline/eval/retrieval_baseline.json \
-  --record-baseline --min-recall-at-5 0 \
-  --output pipeline/eval/results/bm25-bootstrap.json
+  --min-recall-at-5 0 --strict --output pipeline/eval/results/latest.json
 ```
 
-Record measurement-driven tokenizer, source-extraction, or collection changes
-in the release evidence; do not revise labels merely to make a gate pass.
+## 문제 해결
 
-## Citedby operations
+| 증상 | 해결 |
+|---|---|
+| `ModuleNotFoundError: config_loader` | 저장소 루트에서 실행 (패키지 경로 자동 삽입) |
+| PDF 를 못 찾음 (`no_pdf`) | Zotero 앱에서 동기화 → PDF 로컬 다운로드 확인 |
+| `SAFE RUN OWNERSHIP DENIED` | 토픽 alias 를 영문 소문자·숫자로 (한글 금지) |
+| 분류 실패 (`specter2`) | `.cache/` 준비 (`prepare_local_models.py --specter2`) |
+| 크레딧 소진 | 생성 단계 실패 → 재충전 후 `--resume` |
 
-`run_citedby.py` is a standalone tool rather than a `run_full.py` mode. For a reviewed
-seed paper, pass its slug so all timestamped artifacts stay under that paper:
+## 삭제 (포크 제거)
 
-```bash
-PYTHONUTF8=1 python pipeline/run_citedby.py \
-  --doi 10.xxxx/xxxxx \
-  --slug 042_Some_Paper \
-  --pdf-first --build-index --serve --open
-```
-
-Default behavior and controls:
-
-- Timeline narrative and PaperBanana image are **on by default**. Use
-  `--no-timeline` only for a deliberately text-only or fast run.
-- Timeline candidate generation and critique have a **1800-second wall-clock cap**.
-  A timeout does not discard the report: the narrative and remaining sections are
-  still written, with the image failure shown explicitly.
-- `--pdf-first` applies the evidence order corpus review > Zotero PDF > abstract >
-  title. Use `--build-index` with it to write `_citedby_index.json` plus the
-  int8 embedding sidecar from those enriched sources.
-- `--serve` reuses a healthy paper-curation server or starts one; `--open` launches
-  the generated `http://localhost:8000/...` URL. Do not open the report as
-  `file://` when using Deep(er) Research.
-- The report and Deep(er) Research result have separate PDF, Markdown, Obsidian,
-  and Audio controls. Screen links open local corpus reviews, print links switch
-  to DOI/arXiv/source URLs, and Obsidian links target review Markdown or generated
-  evidence notes.
-- The local server must return 200 from `/api/health`. `/api/embed` needs
-  `GOOGLE_API_KEY`; `/api/citedby-answer` uses the configured answer providers.
-  A `304` for `_citedby_index_emb.bin` is a normal browser-cache hit.
-
-Re-running the same command creates a new timestamped report and reuses available
-corpus chunks, embeddings, and cached analysis. Source failures are soft: available
-providers continue, and the final report records the surviving evidence.
-
-## Deploy (Option O-1)
-
-로컬 사용이 기본(Core)입니다. 외부 공유가 필요하면 **3-계층 split-host** 구조로 자동 배포됩니다:
-
-| 계층 | 역할 | 내용 |
-|------|------|------|
-| **Cloudflare Workers (Static Assets + Function)** | 사용자 콘텐츠 서빙 + `/api/audio-email` 라우트 | `docs/` 전체 업로드 (`docs/.assetsignore`로 로컬 전용 토픽 제외) + `worker/index.js` (Audio Overview 이메일 발송 핸들러) |
-| **GitHub `gh-pages` 브랜치** | 진입 URL → Cloudflare 리다이렉트 | 토픽별 리다이렉트 스텁 (1KB 미만), `jehyunlee.github.io/paper-curation/{topic}/` → 운영자가 설정한 Cloudflare URL |
-| **GitHub `master` 브랜치** | 코드·설정·README | 대용량 `docs/papers/`, `docs/{topic}/` 콘텐츠는 `.gitignore`로 제외 |
-
-```bash
-# 배포 (환경변수 필요: CF_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)
-PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode deploy
-```
-
-자동 처리:
-- PNG → WebP 변환 (용량 ~60% 절감)
-- 배포용 HTML에서 API 키·로컬 이메일 제거 후 로컬 working tree 자동 복원
-- `npx wrangler deploy` → Cloudflare 업로드 (해시 기반 증분 업로드) + Worker 함수 동시 배포
-- gh-pages 리다이렉트 스텁 idempotent 동기화 (새 토픽 자동 감지, 변경 없으면 푸시 스킵)
-- Cloudflare 200 OK 검증 (최대 5분 폴링)
-- master에는 **코드·설정 변경만** commit + push (대용량 콘텐츠는 `.gitignore`)
-
-환경변수 발급: Cloudflare Dashboard → My Profile → API Tokens → "Edit Cloudflare Workers" 템플릿.
-```cmd
-setx CF_API_TOKEN "..."
-setx CLOUDFLARE_ACCOUNT_ID "..."
-```
-
-**Custom domain (권장)** — `wrangler.toml` 의 `[[routes]]` 블록에 `pattern = "your-subdomain.your-domain.tld"` + `custom_domain = true` + `zone_name = "your-domain.tld"` 를 박으면 `wrangler deploy` 가 Cloudflare DNS · SSL · 라우팅까지 자동 설정합니다. 동시에 `prepare_deploy.py` 의 `CF_BASE_URL` 도 같은 값으로 갱신해야 gh-pages 스텁이 새 도메인을 가리킵니다. workers.dev 기본 도메인으로도 동작은 하지만 메일 도메인 일관성을 위해 custom domain 권장.
-
-**Cloudflare Worker secrets (이메일 + 질의 임베딩)** — `worker/index.js` 가 두 라우트를 노출합니다: `/api/audio-email` ([Resend](https://resend.com) API 로 MP3 첨부 메일 발송) + `/api/embed` (`gemini-embedding-001` 질의 임베딩 프록시 — 독자가 키 없이 검색하도록). `wrangler secret put` 으로 등록:
-
-```bash
-npx wrangler secret put GOOGLE_API_KEY    # /api/embed 질의 임베딩 프록시용 (gemini-embedding-001, 필수)
-npx wrangler secret put RESEND_API_KEY    # Resend 대시보드의 re_xxx 키 (이메일 발송 필수)
-npx wrangler secret put AUDIO_FROM        # 예: "Paper Curation <noreply@your-domain.tld>" (도메인 verify 필요)
-npx wrangler secret put AUDIO_REPLY_TO    # 답장이 갈 운영자 메일, 예: "you@gmail.com" (선택)
-```
-
-- `GOOGLE_API_KEY` 가 없으면 `/api/embed` 가 실패해 Deep Research 검색이 동작하지 않습니다 (배포 시 필수). 로컬에서는 `pipeline/serve_local.py` 가 같은 역할을 합니다.
-- `RESEND_API_KEY` 가 비어 있으면 `/api/audio-email` 이 503 을 반환하고, 클라이언트는 다운로드만으로 fallback 합니다.
-- `AUDIO_FROM` 의 도메인은 Resend 에서 SPF/DKIM/DMARC TXT 3개를 등록해 verify 해두어야 임의 수신자에게 발송할 수 있습니다 (verify 전엔 Resend 계정 메일 1명만 가능).
-- 로컬 빌드 시 운영자 본인 메일을 미리 박아두려면 `config.json` 에 `"local_emails": ["a@b.com", ...]` 또는 환경변수 `PAPER_CURATION_LOCAL_EMAILS="a@b.com,c@d.com"`. 배포 시 자동 strip 됩니다.
-
----
-
-
-## Recovery flows
-
-```bash
-# Audit PDF↔review mismatches
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode audit
-
-# Delete artifacts for high-confidence mismatches
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode fix-matching --yes
-
-# Re-review cleaned slugs
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode rebuild --slugs <list> --strict-pdf
-
-# Validate
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode validate --yes  # --yes → --strict
-```
-
-## Topic configuration
-
-Each topic ↔ Zotero collection is in `config.json`:
-
-```json
-{
-  "zotero": {
-    "collections": {
-      "ai4s": "WKEZLEE8",
-      "scisci": "3KVIDDKH",
-      "humanoid": "...",
-      "physical-ai": "..."
-    }
-  }
-}
-```
-
-`docs/.assetsignore` controls which topics ship to Cloudflare.
-
-## See also
-
-- `CLAUDE.md` — codebase-wide Claude Code guidance
-- `SKILL.md` — the user-facing skill dispatcher (this trigger entry)
-- `pipeline/api/__init__.py` — programmatic API (25 functions)
-- `pipeline/api/_llm.py` — caching helpers for LLM calls
-- `pipeline/api/extract.py` — figure pre-validation heuristics
+전체 제거 절차는 `AGENTS.md` 의 "삭제 방법" 참고.
