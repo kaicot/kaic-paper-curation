@@ -1,19 +1,18 @@
 # Security — Attack Surface & Guardrails
 
 Threat model for paper-curation and the agent harness that operates it. Scope:
-the pipeline repo, its git remote, the public Cloudflare deploy, local-only data,
+the pipeline repo, its git remote, local-only data,
 and the Claude agent that edits/runs all of the above. This is an operational
-security document, not a legal one — for copyright/deploy legality see
-[`operations/legalcheck/legalcheck.html`](operations/legalcheck/legalcheck.html).
+security document, not a legal one.
 
 ## Assets & trust boundaries
 
 | Asset | Boundary | Notes |
 |---|---|---|
-| API keys (Anthropic/OpenAI/Gemini) | `config.json`, env | gitignored; never committed |
+| Zotero API key | `config.json`, env | gitignored; never committed |
 | Source + pipeline | git → GitHub (public) | code is backed up by the remote |
-| Public deploy | Cloudflare, arXiv/OpenReview OA only | license-gated by `prepare_deploy.py` |
-| Local-only data | this Mac | `docs/papers/**`, `docs/_agent/**`, `docs/_local_keys.json`, Zotero library — **not** in git |
+| Local serve | `serve_local.py` (loopback only) | serves `docs/`; dotfiles/key files excluded |
+| Local-only data | this PC | `docs/papers/**`, `docs/{topic}/**`, `config.json`, Zotero library — **not** in git |
 | Agent harness | `~/.claude/` | permissions, hooks, plugins — controls what the agent may do |
 
 ## Attack surface → control → where it runs → verification
@@ -58,10 +57,10 @@ security document, not a legal one — for copyright/deploy legality see
   `Bash(git init:*)` / `Bash(mv .git…)` allows in project settings (global deny
   overrides them, but do not weaken it).
 
-### S3 — Public deploy exposes copyrighted / original content
-- **Control:** `prepare_deploy.py` re-renders only the upload copy in PUBLIC mode,
-  license-gating figures/reviews/audio (`lib/license_util.py`); original full text
-  (`text.md`) is hard-excluded from the deploy. See the legality review.
+### S3 — Local serve exposes sensitive local content
+- **Control:** `serve_local.py` binds loopback only and excludes dotfiles and
+  key files (`_local_keys.json`). Generated reviews/PDFs stay on this machine
+  and are never pushed to the remote.
 
 ### S4 — Local data loss
 - **Control:** code is on GitHub. **GAP:** git-external artifacts
