@@ -21,9 +21,27 @@
 
 ## 릴리스 상태 및 버전 관리
 
-현재 프로젝트 버전은 **0.1.0**입니다. 정확한 버전은 저장소 루트의
+현재 프로젝트 버전은 **0.2.0**입니다. 정확한 버전은 저장소 루트의
 [`VERSION`](VERSION) 파일이 단일 기준이며, 변경 내역은
 [`CHANGELOG.md`](CHANGELOG.md)에 기록합니다.
+
+### 0.2.0 — 2026-08-13
+
+이번 릴리스는 **실제 사용 환경(36편 Zotero 컬렉션)에서 첫 end-to-end 실행**을
+완료하면서 발견된 문제를 모두 고치고, 초보자도 쉽게 시작할 수 있게 만들었습니다.
+
+- **LLM 위자드 설치** — README/AGENTS.md에 “설치해줘” 한 줄만으로
+  step-by-step(Codex 로그인 → Zotero 컬렉션 → 토픽 alias → PDF 폴더)을
+  진행하는 대화형 설치 흐름을 정의했습니다.
+- **API 키 없이 시작** — 로컬 Zotero(`zotero.sqlite`)에서 컬렉션 목록과
+  PDF 동기화 상태를 읽는 `inspect_local_zotero.py`를 추가해, Zotero 초보나
+  키 발급이 어려운 사용자도 안내받으며 진행할 수 있습니다.
+- **실행 차단 버그 수정** — 모듈 경로, Zotero 클라우드 PDF 매칭, 리뷰
+  frontmatter, 분류/연결/RSS 검증, SPECTER2 어댑터 레이아웃, 전체 sha256
+  인덱스 등을 수정했습니다. 자세한 내역은 [CHANGELOG.md](CHANGELOG.md).
+- **실측 검증** — `고령치매2025_1` 컬렉션(36편 중 PDF 19편)으로
+  리뷰→분류→타임라인→HTML→BM25→RSS까지 `status: succeeded` 확인,
+  로컬 서버·검색·Deep Research 답변 API 정상 동작 확인.
 
 ### 0.1.0 — 2026-08-08
 
