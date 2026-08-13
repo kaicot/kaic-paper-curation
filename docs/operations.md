@@ -206,15 +206,21 @@ deferring borderline cases to the LLM.
 ## Retrieval quality regression
 
 The tracked `pipeline/eval/retrieval_queries.jsonl` corpus contains five fixed
-queries for each of the eight current collections. Query vectors are generated
-once with Gemini `RETRIEVAL_QUERY` and committed, so routine evaluation is
-offline and deterministic.
+queries for each of the eight current collections. Evaluation reads only the
+versioned sparse-index-v2 artifacts and runs deterministic local BM25 ranking.
+No query-vector file, embedding sidecar, API key, or network request is used.
 
 ```bash
+# Record the first lexical baseline after all sparse indexes are rebuilt
+python pipeline/evaluate_retrieval.py \
+  --queries pipeline/eval/retrieval_queries.jsonl \
+  --all --baseline pipeline/eval/retrieval_baseline.json \
+  --record-baseline --min-recall-at-5 0 \
+  --output pipeline/eval/results/bm25-bootstrap.json
+
 # Run all collections and reject recall@5 regressions beyond 0.025
 python pipeline/evaluate_retrieval.py \
   --queries pipeline/eval/retrieval_queries.jsonl \
-  --vectors pipeline/eval/retrieval_query_vectors.json \
   --all --baseline pipeline/eval/retrieval_baseline.json \
   --min-recall-at-5 0 --strict \
   --output pipeline/eval/results/latest.json \
@@ -223,30 +229,32 @@ python pipeline/evaluate_retrieval.py \
 # Install the same test on macOS (Sunday 03:17)
 scripts/install-retrieval-eval-launchd.sh
 ```
-The installer mirrors only evaluator runtime, tracked corpus, baseline, and the
-eight index sidecars to
+The installer mirrors only evaluator runtime, tracked corpus, sparse indexes,
+and their exact paper-index/review source manifests to
 `~/Library/Application Support/paper-curation/retrieval-eval/`. macOS
 LaunchAgents cannot read a repository under `Documents` without TCC approval,
 so the scheduled job evaluates this atomic snapshot and writes reports under
 `~/Library/Logs/paper-curation/`. Successful orchestrated index rebuilds refresh
 the snapshot automatically when the LaunchAgent is installed.
 
-`run_update_force.py` rebuilds `_cross`, then hard-gates the rebuilt source
-collection and `_cross` before deploy. The bootstrap labels are BM25 top-1
+After sparse topic and `_cross` rebuilds, the installed local snapshot is
+refreshed before its next scheduled evaluation. The bootstrap labels are BM25 top-1
 known-item targets, not exhaustive relevance judgments; therefore the active
 gate detects regression from the tracked baseline rather than claiming a
 0.95 absolute floor. Review observed failures before adding them to the query
-set. Regenerate vectors explicitly after changing query bytes:
+set. After changing query bytes, rebuild the affected sparse indexes and record
+a new measured lexical baseline explicitly:
 
 ```bash
-python pipeline/generate_retrieval_vectors.py \
+python pipeline/evaluate_retrieval.py \
   --queries pipeline/eval/retrieval_queries.jsonl \
-  --output pipeline/eval/retrieval_query_vectors.json --force
+  --all --baseline pipeline/eval/retrieval_baseline.json \
+  --record-baseline --min-recall-at-5 0 \
+  --output pipeline/eval/results/bm25-bootstrap.json
 ```
 
-Record measurement-driven model, chunking, or collection changes in
-`pipeline/eval/retrieval_decisions.json`; do not revise labels merely to make a
-gate pass.
+Record measurement-driven tokenizer, source-extraction, or collection changes
+in the release evidence; do not revise labels merely to make a gate pass.
 
 ## Citedby operations
 

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "schema": "final-review-requirements-v1",
+  "verifiers": {
+    "F1": {
+      "commands": ["release_tests", "evidence_validate", "diff_check"],
+      "attachments": ["tests", "evidence", "diff"],
+      "negatives": ["approval_drift", "ledger_tamper", "patch_mismatch"],
+      "cleanup": ["evidence_preserved"],
+      "producers": {
+        "release_tests": ["tests"],
+        "evidence_validate": ["evidence"],
+        "diff_check": ["diff"],
+        "approval_drift": ["evidence"],
+        "ledger_tamper": ["evidence"],
+        "patch_mismatch": ["evidence"],
+        "evidence_preserved": ["evidence"]
+      }
+    },
+    "F2": {
+      "commands": ["lsp_provision", "lsp_verify", "lsp_diagnostics", "security_tests", "provider_scan", "secret_scan"],
+      "attachments": ["changed_files", "lsp", "provider_scan", "secret_scan"],
+      "negatives": ["provider_import", "new_secret", "server_hash_mismatch"],
+      "cleanup": ["servers_stopped", "tool_temp_removed"],
+      "producers": {
+        "lsp_provision": ["lsp"],
+        "lsp_verify": ["lsp"],
+        "lsp_diagnostics": ["changed_files", "lsp"],
+        "security_tests": ["secret_scan"],
+        "provider_scan": ["provider_scan"],
+        "secret_scan": ["secret_scan"],
+        "provider_import": ["provider_scan"],
+        "new_secret": ["secret_scan"],
+        "server_hash_mismatch": ["lsp"],
+        "servers_stopped": ["lsp"],
+        "tool_temp_removed": ["lsp"]
+      }
+    },
+    "F3": {
+      "commands": ["fixture_validate", "doctor", "run_full", "bm25", "serve", "answer_probe", "answer_post"],
+      "attachments": ["child_env", "http", "browser_actions", "browser_screenshot", "listener", "cleanup"],
+      "negatives": ["production_override"],
+      "cleanup": ["pid_stopped", "port_released", "temp_removed", "poison_cleared"],
+      "producers": {
+        "fixture_validate": ["cleanup"],
+        "doctor": ["child_env"],
+        "run_full": ["child_env"],
+        "bm25": ["http"],
+        "serve": ["listener"],
+        "answer_probe": ["http"],
+        "answer_post": ["http"],
+        "production_override": ["child_env"],
+        "pid_stopped": ["listener"],
+        "port_released": ["listener"],
+        "temp_removed": ["cleanup"],
+        "poison_cleared": ["cleanup"]
+      }
+    },
+    "F4": {
+      "commands": ["scope_tests", "secret_scan", "scope_validate"],
+      "attachments": ["status", "diff", "scope", "secret_scan"],
+      "negatives": ["paid_capability"],
+      "cleanup": ["fixture_removed", "unrelated_hashes_preserved"],
+      "producers": {
+        "scope_tests": ["scope"],
+        "secret_scan": ["secret_scan"],
+        "scope_validate": ["status", "diff", "scope"],
+        "paid_capability": ["scope"],
+        "fixture_removed": ["scope"],
+        "unrelated_hashes_preserved": ["scope"]
+      }
+    }
+  }
+}

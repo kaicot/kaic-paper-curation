@@ -1,11 +1,4 @@
-#!/usr/bin/env python3
-"""Read-only retrieval over the Deep Research search-index sidecars.
-
-The scoring intentionally mirrors the browser implementation in
-``build_topic_index.py``: ASCII alphanumeric tokens plus Hangul character
-bigrams, BM25 (k1=1.5, b=0.75), int8 / 127 document-vector normalization,
-and zero-based-rank RRF (k=60).  Querying never builds or changes an index.
-"""
+"""Read-only BM25 querying for sparse-index-v2 artifacts."""
 
 from __future__ import annotations
 
@@ -13,315 +6,394 @@ import argparse
 import json
 import math
 import re
-import struct
-from collections import Counter
+import sys
 from pathlib import Path
-from typing import Any, Sequence
-
-BM25_K1 = 1.5
-BM25_B = 0.75
-RRF_K = 60
-MAX_CHUNKS_PER_PAPER = 3
-_ASCII_RE = re.compile(r"[a-z0-9]+")
-_HANGUL_RE = re.compile(r"[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]+")
+from typing import Final, cast
 
 
-def tokenize(text: str) -> list[str]:
-    """Mirror browser ``deepTokenize`` for English and Korean text."""
-    text = str(text or "").lower()
-    tokens = _ASCII_RE.findall(text)
-    for run in _HANGUL_RE.findall(text):
-        if len(run) == 1:
-            tokens.append(run)
-        else:
-            tokens.extend(run[index:index + 2] for index in range(len(run) - 1))
-    return tokens
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.sparse_index import (  # noqa: E402
+    ACTIVE_NAME,
+    SPARSE_SCHEMA,
+    SparseIndexError,
+    cross_sparse_payload,
+    sparse_payload,
+    tokenize,
+    validate_sparse_index_payload,
+)
 
 
-def _default_docs_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "docs"
+QUERY_SCHEMA: Final = "sparse-query-v1"
 
 
-def _topic_dir(topic: str, docs_dir: str | Path | None) -> Path:
-    root = Path(docs_dir) if docs_dir is not None else _default_docs_dir()
-    root = root.resolve()
-    candidate = (root / topic).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(f"topic must be under docs directory: {topic!r}") from exc
-    if not candidate.is_dir():
-        raise FileNotFoundError(f"search-index topic directory not found: {candidate}")
-    return candidate
+class SparseQueryError(RuntimeError):
+    pass
 
 
-def _load_index(topic: str, docs_dir: str | Path | None) -> tuple[dict[str, Any], Path]:
-    topic_dir = _topic_dir(topic, docs_dir)
-    index_path = topic_dir / "_search_index.json"
-    if not index_path.is_file():
-        raise FileNotFoundError(f"search index not found: {index_path}")
-    try:
-        index = json.loads(index_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid search index JSON: {index_path}: {exc.msg}") from exc
-    if not isinstance(index, dict):
-        raise ValueError(f"invalid search index: {index_path} must contain an object")
-    chunks = index.get("chunks")
-    if not isinstance(chunks, list):
-        raise ValueError("invalid search index: chunks must be a list")
-    count, dim = index.get("count"), index.get("dim")
-    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-        raise ValueError("invalid search index: count must be a non-negative integer")
-    if not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0:
-        raise ValueError("invalid search index: dim must be a positive integer")
-    if count != len(chunks):
-        raise ValueError(f"search index count mismatch: count={count}, chunks={len(chunks)}")
-    if not isinstance(index.get("papers"), dict):
-        raise ValueError("invalid search index: papers must be an object")
-    return index, topic_dir
-
-
-def _load_embedding_bytes(index: dict[str, Any], topic_dir: Path) -> bytes:
-    """Validate and return the compact signed-int8 sidecar unchanged."""
-    emb_file = index.get("emb_file")
-    if not isinstance(emb_file, str) or not emb_file:
-        raise FileNotFoundError("dense retrieval requires search index emb_file sidecar")
-    sidecar = (topic_dir / emb_file).resolve()
-    try:
-        sidecar.relative_to(topic_dir.resolve())
-    except ValueError as exc:
-        raise ValueError(f"embedding sidecar must be inside topic directory: {emb_file!r}") from exc
-    if not sidecar.is_file():
-        raise FileNotFoundError(f"embedding sidecar not found: {sidecar}")
-    raw = sidecar.read_bytes()
-    expected = index["count"] * index["dim"]
-    if len(raw) != expected:
-        raise ValueError(
-            f"embedding sidecar size mismatch: {len(raw)} != {expected} bytes "
-            "(count * dim)"
+def _canonical_json(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         )
-    return raw
+        + "\n"
+    ).encode("utf-8")
 
 
-def _dense_scores(raw: bytes, dim: int, query_vector: list[float],
-                  eligible: list[int]) -> dict[int, float]:
-    """Cosine scores directly over int8 bytes without expanding all vectors.
-
-    The `/127` factor cancels between dot product and document norm. Memory
-    therefore remains the sidecar size (~27 MB for `_cross`), rather than
-    hundreds of MB of Python float/list objects.
-    """
-    scores: dict[int, float] = {}
-    fmt = f"{dim}b"
-    for position in eligible:
-        values = struct.unpack_from(fmt, raw, position * dim)
-        norm = math.sqrt(sum(value * value for value in values)) or 1.0
-        scores[position] = sum(
-            query_vector[i] * value for i, value in enumerate(values)
-        ) / norm
-    return scores
+def _duplicate_rejecting_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SparseQueryError(f"duplicate-json-key:{key}")
+        result[key] = value
+    return result
 
 
-def _normalize_query_vector(query_vector: Sequence[float], dim: int) -> list[float]:
-    if isinstance(query_vector, (str, bytes)):
-        raise ValueError("query_vector must be a numeric sequence")
+def _reject_constant(value: str) -> object:
+    raise SparseQueryError(f"invalid-json-constant:{value}")
+
+
+def _load_json(path: Path) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise SparseQueryError("index-file-required")
     try:
-        vector = [float(value) for value in query_vector]
-    except (TypeError, ValueError) as exc:
-        raise ValueError("query_vector must be a numeric sequence") from exc
-    if len(vector) != dim:
-        raise ValueError(f"query vector dimension mismatch: {len(vector)} != index dim {dim}")
-    if not all(math.isfinite(value) for value in vector):
-        raise ValueError("query_vector must contain only finite values")
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0:
-        raise ValueError("query_vector must not be all zeros")
-    return [value / norm for value in vector]
+        raw = cast(
+            object,
+            json.loads(
+                path.read_text(encoding="utf-8"),
+                object_pairs_hook=_duplicate_rejecting_object,
+                parse_constant=_reject_constant,
+            ),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise SparseQueryError(f"invalid-index-json:{error}") from error
+    if not isinstance(raw, dict):
+        raise SparseQueryError("index-root-must-be-object")
+    return cast(dict[str, object], raw)
 
 
-def _embed_query(query: str, dim: int) -> list[float]:
-    # Deferred import keeps BM25-only imports and queries free of key lookup/network work.
+def _contained(root: Path, path: Path) -> None:
+    resolved_root = root.resolve()
+    resolved_path = path.resolve(strict=False)
+    if (
+        resolved_path != resolved_root
+        and resolved_root not in resolved_path.parents
+    ):
+        raise SparseQueryError("index-path-outside-docs")
+
+
+def _topic_freshness(
+    selected_topic: str,
+    docs_dir: Path,
+    value: dict[str, object],
+) -> tuple[str, str]:
     try:
-        from serve_local import gemini_embed, resolve_google_key
-    except ImportError:  # Supports ``import pipeline.query_search_index`` as well as script use.
-        from pipeline.serve_local import gemini_embed, resolve_google_key
-    key = resolve_google_key()
-    if not key:
-        raise ValueError("dense retrieval requires GOOGLE_API_KEY or GEMINI_API_KEY")
-    return _normalize_query_vector(gemini_embed(query, key), dim)
-
-
-def _build_bm25(chunks: list[dict[str, Any]], query_terms: list[str]
-                ) -> tuple[list[Counter[str]], list[int], dict[str, float], float]:
-    """Build only query-term TF/DF, sufficient for one-shot CLI BM25.
-
-    The browser caches every term for repeated interactive queries. A CLI call
-    has one query, so retaining all corpus terms would waste substantial memory
-    on `_cross` while producing identical scores.
-    """
-    wanted = set(query_terms)
-    documents: list[Counter[str]] = []
-    lengths: list[int] = []
-    document_frequency: Counter[str] = Counter()
-    for chunk in chunks:
-        terms = tokenize(chunk.get("text", ""))
-        frequencies = Counter(term for term in terms if term in wanted)
-        documents.append(frequencies)
-        lengths.append(len(terms))
-        document_frequency.update(frequencies.keys())
-    count = len(chunks)
-    idf = {
-        term: math.log(1 + (count - frequency + 0.5) / (frequency + 0.5))
-        for term, frequency in document_frequency.items()
-    }
-    return documents, lengths, idf, sum(lengths) / (count or 1)
-
-
-def _bm25_score(tf: Counter[str], length: int, idf: dict[str, float], average_length: float,
-                query_terms: list[str]) -> float:
-    score = 0.0
-    for term in set(query_terms):  # Browser deliberately does not repeat-weight query terms.
-        frequency = tf.get(term, 0)
-        if frequency:
-            score += idf.get(term, 0.0) * (frequency * (BM25_K1 + 1)) / (
-                frequency + BM25_K1 * (1 - BM25_B + BM25_B * length / (average_length or 1))
+        expected = (
+            cross_sparse_payload(
+                cast(list[str], value.get("topics", [])),
+                docs_dir,
             )
-    return score
+            if selected_topic == "_cross"
+            else sparse_payload(
+                selected_topic,
+                docs_dir / "papers" / "_papers_index.json",
+            )
+        )
+        _ = validate_sparse_index_payload(expected, selected_topic)
+    except (OSError, SparseIndexError, RuntimeError, ValueError) as error:
+        return "stale", f"source-unavailable:{error}"
+    if (
+        expected.get("source_fingerprint")
+        != value.get("source_fingerprint")
+    ):
+        return "stale", "source-fingerprint-mismatch"
+    if _canonical_json(expected) != _canonical_json(value):
+        return "corrupt", "canonical-payload-mismatch"
+    return "fresh", ""
 
 
-def _eligible_indexes(index: dict[str, Any], min_year: int | None, max_year: int | None) -> list[int]:
-    if min_year is not None and max_year is not None and min_year > max_year:
-        raise ValueError("min_year must not be greater than max_year")
-    eligible: list[int] = []
-    papers = index["papers"]
-    for position, chunk in enumerate(index["chunks"]):
-        if not isinstance(chunk, dict):
-            continue
-        paper = papers.get(chunk.get("slug"))
-        if not isinstance(paper, dict):
-            continue
-        if min_year is not None or max_year is not None:
-            try:
-                year = int(paper.get("year"))
-            except (TypeError, ValueError):
-                continue
-            if (min_year is not None and year < min_year) or (max_year is not None and year > max_year):
-                continue
-        eligible.append(position)
-    return eligible
-
-
-def _rank(scores: dict[int, float], eligible: list[int]) -> dict[int, int]:
-    return {position: rank for rank, position in enumerate(sorted(eligible, key=lambda item: (-scores[item], item)))}
-
-
-def query_search_index(topic: str, query: str, *, top_k: int = 10, mode: str = "hybrid",
-                       min_year: int | None = None, max_year: int | None = None,
-                       query_vector: Sequence[float] | None = None,
-                       docs_dir: str | Path | None = None) -> dict[str, Any]:
-    """Query a topic's prebuilt Deep Research index without modifying it."""
-    if mode not in {"hybrid", "dense", "bm25"}:
-        raise ValueError("mode must be one of: hybrid, dense, bm25")
-    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
-        raise ValueError("top_k must be a positive integer")
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("query must be a non-empty string")
-    if min_year is not None and not isinstance(min_year, int):
-        raise ValueError("min_year must be an integer or None")
-    if max_year is not None and not isinstance(max_year, int):
-        raise ValueError("max_year must be an integer or None")
-
-    index, topic_dir = _load_index(topic, docs_dir)
-    chunks = index["chunks"]
-    eligible = _eligible_indexes(index, min_year, max_year)
-    query_terms = tokenize(query)
-    documents, lengths, idf, average_length = _build_bm25(chunks, query_terms)
-    bm25_scores = {
-        position: _bm25_score(documents[position], lengths[position], idf, average_length, query_terms)
-        for position in eligible
-    }
-    bm25_rank = _rank(bm25_scores, eligible)
-
-    dense_scores: dict[int, float] = {}
-    dense_rank: dict[int, int] = {}
-    if mode in {"dense", "hybrid"}:
-        vector = _normalize_query_vector(query_vector, index["dim"]) if query_vector is not None else _embed_query(query, index["dim"])
-        raw_embeddings = _load_embedding_bytes(index, topic_dir)
-        dense_scores = _dense_scores(
-            raw_embeddings, index["dim"], vector, eligible)
-        dense_rank = _rank(dense_scores, eligible)
-
-    if mode == "bm25":
-        final_scores = {position: 1 / (RRF_K + bm25_rank[position]) for position in eligible}
-    elif mode == "dense":
-        final_scores = {position: 1 / (RRF_K + dense_rank[position]) for position in eligible}
-    else:
-        final_scores = {
-            position: 1 / (RRF_K + dense_rank[position]) + 1 / (RRF_K + bm25_rank[position])
-            for position in eligible
-        }
-    ordered = sorted(eligible, key=lambda position: (-final_scores[position], position))
-
-    results: list[dict[str, Any]] = []
-    per_paper: Counter[str] = Counter()
-    for position in ordered:
-        chunk = chunks[position]
-        slug = str(chunk.get("slug", ""))
-        if per_paper[slug] >= MAX_CHUNKS_PER_PAPER:
-            continue
-        per_paper[slug] += 1
-        paper = index["papers"][slug]
-        result: dict[str, Any] = {
-            "rank": len(results) + 1,
-            "slug": slug,
-            "title": paper.get("title", slug),
-            "year": paper.get("year"),
-            "section": chunk.get("section", ""),
-            "text": chunk.get("text", ""),
-            "rrf_score": final_scores[position],
-            "dense_score": dense_scores.get(position, 0.0),
-            "bm25_score": bm25_scores[position],
-        }
-        url = paper.get("external_url") or paper.get("url")
-        if url:
-            result["url"] = url
-        results.append(result)
-        if len(results) >= top_k:
-            break
-    return {
+def _response(
+    status: str,
+    topic: str,
+    query: str,
+    *,
+    code: str | None = None,
+    message: str | None = None,
+    results: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "dense_score": 0.0,
+        "mode": "bm25",
         "query": query,
+        "results": results or [],
+        "schema": QUERY_SCHEMA,
+        "schema_version": 1,
+        "status": status,
         "topic": topic,
-        "mode": mode,
-        "model": index.get("model"),
-        "dim": index["dim"],
-        "count": index["count"],
-        "results": results,
     }
+    if code is not None:
+        payload["code"] = code
+    if message is not None:
+        payload["message"] = message
+    if status != "ok":
+        payload["rebuild_command"] = [
+            sys.executable,
+            "pipeline/build_search_index.py",
+            "--topic",
+            topic,
+            "--mode",
+            "bm25",
+        ]
+    return payload
+
+
+def query_search_index(
+    topic: str | None = "_cross",
+    query: str = "",
+    *,
+    mode: str = "bm25",
+    top_k: int = 10,
+    docs_dir: str | Path | None = None,
+    **_retired_options: object,
+) -> dict[str, object]:
+    selected_topic = topic or "_cross"
+    if mode != "bm25":
+        return _response(
+            "unsupported-mode",
+            selected_topic,
+            query,
+            code="bm25-only",
+            message=f"retrieval mode {mode!r} is unavailable",
+        )
+    if not query.strip():
+        return _response(
+            "invalid-query",
+            selected_topic,
+            query,
+            code="query-required",
+        )
+    query_terms = sorted(set(tokenize(query)))
+    if not query_terms:
+        return _response(
+            "invalid-query",
+            selected_topic,
+            query,
+            code="empty-query-terms",
+        )
+    if (
+        isinstance(top_k, bool)
+        or top_k < 1
+        or top_k > 100
+    ):
+        return _response(
+            "invalid-query",
+            selected_topic,
+            query,
+            code="top-k-out-of-range",
+        )
+    docs_root = (
+        Path(docs_dir).resolve()
+        if docs_dir is not None
+        else (ROOT / "docs").resolve()
+    )
+    if (
+        not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", selected_topic)
+        and selected_topic != "_cross"
+    ) or ".." in selected_topic:
+        return _response(
+            "invalid-index",
+            selected_topic,
+            query,
+            code="invalid-topic",
+        )
+    index_path = docs_root / selected_topic / ACTIVE_NAME
+    try:
+        _contained(docs_root, index_path)
+        if not index_path.exists():
+            return _response(
+                "missing-index",
+                selected_topic,
+                query,
+                code="sparse-index-missing",
+            )
+        value = _load_json(index_path)
+        if (
+            value.get("schema") != SPARSE_SCHEMA
+            or value.get("schema_version") != 2
+        ):
+            return _response(
+                "unsupported-index",
+                selected_topic,
+                query,
+                code="sparse-index-v2-required",
+            )
+        documents, postings = validate_sparse_index_payload(
+            value,
+            selected_topic,
+        )
+        if index_path.read_bytes() != _canonical_json(value):
+            return _response(
+                "invalid-index",
+                selected_topic,
+                query,
+                code="noncanonical-index",
+            )
+        freshness, reason = _topic_freshness(
+            selected_topic,
+            docs_root,
+            value,
+        )
+        if freshness == "stale":
+            return _response(
+                "stale-index",
+                selected_topic,
+                query,
+                code=reason,
+            )
+        if freshness == "corrupt":
+            return _response(
+                "invalid-index",
+                selected_topic,
+                query,
+                code=reason,
+            )
+    except (SparseQueryError, SparseIndexError) as error:
+        return _response(
+            "invalid-index",
+            selected_topic,
+            query,
+            code=str(error),
+        )
+    except (OSError, ValueError) as error:
+        return _response(
+            "invalid-index",
+            selected_topic,
+            query,
+            code=f"index-io:{error}",
+        )
+    if not documents:
+        return _response(
+            "empty-index",
+            selected_topic,
+            query,
+            code="no-documents",
+        )
+    term_rows: dict[str, dict[int, int]] = {
+        term: {
+            document_id: frequency
+            for document_id, frequency in postings.get(term, [])
+        }
+        for term in query_terms
+        if term in postings
+    }
+    average_value = value["average_document_length"]
+    if not isinstance(average_value, (int, float)):
+        raise AssertionError("validated average length must be numeric")
+    average_length = float(average_value)
+    document_count = len(documents)
+    scored: list[tuple[float, int, list[str]]] = []
+    for document_id, document in enumerate(documents):
+        length = cast(int, document["length"])
+        score = 0.0
+        matched: list[str] = []
+        for term, frequencies in term_rows.items():
+            frequency = frequencies.get(document_id)
+            if frequency is None:
+                continue
+            matched.append(term)
+            document_frequency = len(postings[term])
+            inverse_frequency = math.log(
+                1
+                + (
+                    document_count
+                    - document_frequency
+                    + 0.5
+                )
+                / (document_frequency + 0.5)
+            )
+            denominator = frequency + 1.5 * (
+                0.25
+                + 0.75
+                * (length / average_length if average_length else 0.0)
+            )
+            score += inverse_frequency * frequency * 2.5 / denominator
+        if matched:
+            scored.append((score, document_id, sorted(matched)))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    results: list[dict[str, object]] = []
+    for rank, (score, document_id, matched) in enumerate(scored[:top_k], 1):
+        document = documents[document_id]
+        result: dict[str, object] = {
+            "bm25_score": score,
+            "dense_score": 0.0,
+            "document_id": document_id,
+            "matched_terms": matched,
+            "rank": rank,
+            "score": score,
+            "slug": document["slug"],
+            "title": document["title"],
+        }
+        if "topics" in document:
+            result["topics"] = document["topics"]
+        results.append(result)
+    response = _response(
+        "ok",
+        selected_topic,
+        query,
+        results=results,
+    )
+    response["index_source_fingerprint"] = value["source_fingerprint"]
+    response["query_terms"] = query_terms
+    return response
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Query a prebuilt Deep Research search index")
-    parser.add_argument("--topic", default="_cross", help="topic directory under docs (default: _cross)")
-    parser.add_argument("--query", required=True, help="search query")
-    parser.add_argument("--top-k", type=int, default=10, help="maximum results (default: 10)")
-    parser.add_argument("--mode", choices=("hybrid", "dense", "bm25"), default="hybrid")
-    parser.add_argument("--min-year", type=int)
-    parser.add_argument("--max-year", type=int)
-    parser.add_argument("--json", action="store_true", dest="as_json", help="emit JSON")
+    parser = argparse.ArgumentParser(
+        description="Query a local sparse-index-v2 artifact with BM25",
+    )
+    _ = parser.add_argument("--topic")
+    _ = parser.add_argument("--query", required=True)
+    _ = parser.add_argument("--mode", default="bm25")
+    _ = parser.add_argument("--top-k", type=int, default=10)
+    _ = parser.add_argument("--docs-dir", type=Path)
+    _ = parser.add_argument("--json", action="store_true")
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    result = query_search_index(args.topic, args.query, top_k=args.top_k, mode=args.mode,
-                                min_year=args.min_year, max_year=args.max_year)
-    if args.as_json:
-        print(json.dumps(result, ensure_ascii=False))
+def main(argv: list[str] | None = None) -> int:
+    arguments = build_parser().parse_args(argv)
+    payload = query_search_index(
+        cast(str | None, arguments.topic),
+        cast(str, arguments.query),
+        mode=cast(str, arguments.mode),
+        top_k=cast(int, arguments.top_k),
+        docs_dir=cast(Path | None, arguments.docs_dir),
+    )
+    rendered = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if cast(bool, arguments.json):
+        print(rendered)
+    elif payload["status"] == "ok":
+        for result in cast(list[dict[str, object]], payload["results"]):
+            score = cast(float, result["score"])
+            print(
+                f"{result['rank']}. {result['slug']} {score:.6f}"
+            )
     else:
-        for item in result["results"]:
-            snippet = " ".join(str(item["text"]).split())[:180]
-            print(f"{item['rank']}. {item['title']} — {item['section']}: {snippet}")
-    return 0
+        print(rendered, file=sys.stderr)
+    return 0 if payload["status"] == "ok" else 2
 
 
 if __name__ == "__main__":

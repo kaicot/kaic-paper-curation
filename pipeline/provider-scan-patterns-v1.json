@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "roots": ["pipeline", "worker", "scripts"],
+  "extensions": [".py", ".js", ".mjs"],
+  "excluded_paths": [
+    "pipeline/runtime_policy.py",
+    "pipeline/tools/bootstrap_provider_scanner.py",
+    "pipeline/tools/check_provider_inventory.py",
+    "pipeline/tools/parse_provider_javascript.mjs",
+    "pipeline/tools/resolve_runtime_policy.py",
+    "pipeline/tests/test_provider_inventory.py",
+    "pipeline/tests/test_runtime_policy.py"
+  ],
+  "lexical": [
+    "anthropic",
+    "openai",
+    "gemini",
+    "google\\.generativeai",
+    "google\\.genai",
+    "GenerativeModel",
+    "api\\.anthropic",
+    "api\\.openai",
+    "generativelanguage",
+    "workers\\.dev",
+    "resend"
+  ],
+  "provider_modules": [
+    "anthropic",
+    "openai",
+    "google.generativeai",
+    "google.genai",
+    "google.generativeai.types"
+  ],
+  "constructor_names": [
+    "Anthropic",
+    "AsyncAnthropic",
+    "OpenAI",
+    "AsyncOpenAI",
+    "GenerativeModel",
+    "Client"
+  ],
+  "environment_keys": [
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "RESEND_API_KEY",
+    "CLOUDFLARE_API_TOKEN",
+    "CF_API_TOKEN"
+  ],
+  "provider_hosts": [
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+    "api.resend.com",
+    "workers.dev"
+  ]
+}

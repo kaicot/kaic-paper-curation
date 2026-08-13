@@ -1,0 +1,57 @@
+{
+  "$id": "local-answer-response-v1",
+  "additionalProperties": false,
+  "properties": {
+    "answer": {
+      "maxLength": 30000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "citations": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "ref": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "section": {
+            "maxLength": 120,
+            "minLength": 1,
+            "type": "string"
+          },
+          "slug": {
+            "maxLength": 180,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "slug",
+          "section"
+        ],
+        "type": "object"
+      },
+      "maxItems": 12,
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema": {
+      "const": "local-answer-response-v1",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema",
+    "schema_version",
+    "answer",
+    "citations"
+  ],
+  "type": "object"
+}

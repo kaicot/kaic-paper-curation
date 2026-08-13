@@ -15,11 +15,16 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
 
-from config_loader import PAPERS_DIR as _PAPERS_DIR, get_topic_dir
-from lib.dateutil import normalize_date
-from lib.atomic_io import atomic_write_text
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from pipeline.config_loader import PAPERS_DIR as _PAPERS_DIR, get_topic_dir  # noqa: E402
+from pipeline.lib.dateutil import normalize_date  # noqa: E402
+from pipeline.lib.atomic_io import atomic_write_text  # noqa: E402
 
 PAPERS_DIR = str(_PAPERS_DIR)
 
@@ -170,6 +175,6 @@ def main():
 
 
 if __name__ == "__main__":
-    from _env_guard import force_py312
+    from pipeline._env_guard import force_py312
     force_py312()
     main()

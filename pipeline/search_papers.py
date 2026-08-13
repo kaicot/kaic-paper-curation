@@ -56,8 +56,9 @@ def score_relevance(paper: dict, primary_keywords: list, secondary_keywords: lis
 # 못 잡는 동의어/약어 논문을 살리고(RESCUE) 키워드만 걸린 무관 논문을 떨군다(DROP).
 # 어떤 단계든 실패하면(키 없음/네트워크/파싱) 경고를 찍고 키워드-only 로 폴백한다.
 
-def _relevance_mode():
-    return (os.environ.get("SEARCH_RELEVANCE_MODE", "hybrid") or "hybrid").strip().lower()
+def _relevance_mode(config):
+    _ = config
+    return "keyword"
 
 
 def _build_topic_description(topic, primary_kws, secondary_kws):
@@ -69,21 +70,6 @@ def _build_topic_description(topic, primary_kws, secondary_kws):
     )
 
 
-def _make_anthropic_client():
-    """Anthropic 클라이언트 생성. 키 없거나 실패하면 None (→ 키워드 폴백)."""
-    try:
-        from anthropic import Anthropic
-        from config_loader import load_config
-        key = os.environ.get("ANTHROPIC_API_KEY") or load_config().get("anthropic_api_key", "")
-        if not key:
-            print("  경고: ANTHROPIC_API_KEY 없음 — hybrid relevance 건너뜀 (keyword 폴백)",
-                  file=sys.stderr)
-            return None
-        return Anthropic(api_key=key, timeout=180.0, max_retries=4)
-    except Exception as e:
-        print(f"  경고: Anthropic 클라이언트 생성 실패: {str(e)[:80]} (keyword 폴백)",
-              file=sys.stderr)
-        return None
 
 
 def _score_keyword_only(papers, primary_kws, secondary_kws):
@@ -92,45 +78,9 @@ def _score_keyword_only(papers, primary_kws, secondary_kws):
         p["relevance_score"] = round(score_relevance(p, primary_kws, secondary_kws), 3)
 
 
-def _score_hybrid(papers, topic, primary_kws, secondary_kws, *, client=None,
-                  cache_dir=None):
-    """키워드 + 의미 점수를 blend 해 relevance_score 부여.
-
-    성공하면 True (점수 세팅 완료), 의미 신호를 전혀 못 얻으면 False (→ 호출부가
-    키워드-only 로 폴백). 의미 채점이 일부만 성공하면 누락 paper 는 키워드 점수로
-    채워 부분 결과를 살린다.
-    """
-    from lib.relevance import expand_keywords, semantic_relevance, combined_score
-
-    if client is None:
-        client = _make_anthropic_client()
-    if client is None:
-        return False
-
-    # (1) 키워드 확장(선택) — 동의어/약어를 secondary 로 추가해 substring recall 보강.
-    try:
-        extra = expand_keywords(topic, primary_kws, secondary_kws, client,
-                                cache_dir=cache_dir)
-    except Exception as e:
-        print(f"  경고: keyword 확장 실패: {str(e)[:80]}", file=sys.stderr)
-        extra = []
-    if extra:
-        print(f"  키워드 확장: +{len(extra)}개 동의어/약어", file=sys.stderr)
-    secondary_aug = list(secondary_kws) + extra
-
-    # (2) 의미 채점 (배치 Haiku) — papers index → 0~1 점수.
-    topic_desc = _build_topic_description(topic, primary_kws, secondary_kws)
-    sem = semantic_relevance(papers, topic_desc, client)
-    if not sem:
-        # 전부 실패 → 키워드-only 폴백 신호.
-        return False
-
-    # (3) blend. 의미 점수 없는 paper(누락 index)는 키워드 점수 그대로(combined None).
-    for i, p in enumerate(papers):
-        kw = score_relevance(p, primary_kws, secondary_aug)
-        p["relevance_score"] = round(combined_score(kw, sem.get(i)), 3)
-    print(f"  hybrid relevance: {len(sem)}/{len(papers)}편 의미 채점 반영", file=sys.stderr)
-    return True
+def _score_hybrid(papers, keywords, config):
+    _ = config
+    return _score_keyword_only(papers, keywords)
 
 
 # ---------------------------------------------------------------------------

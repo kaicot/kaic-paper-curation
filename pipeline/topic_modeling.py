@@ -4,9 +4,9 @@ BERTopic 기반 hierarchical topic modeling + UMAP 시각화 좌표 생성.
 1. text.md에서 originality 추출 (룰 기반, 영어 아니면 번역)
 2. SPECTER2 임베딩
 3. BERTopic fine-grained clustering → 40~60 sub-topics
-4. Sonnet names sub-topics, then groups into 8~12 categories (bottom-up)
+4. saved-auth Codex names sub-topics, then groups into 8~12 categories (bottom-up)
 5. UMAP 2D 좌표 저장
-6. 임베딩 코사인 유사도 top-20 → Sonnet이 이유/관계 작성
+6. 임베딩 코사인 유사도 top-20 → saved-auth Codex가 이유/관계 작성
 
 Usage:
   PYTHONUTF8=1 python pipeline/topic_modeling.py --topic ai4s
@@ -15,50 +15,181 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
-import time
+import re
+import sys
 import numpy as np
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol, cast, final
 
-from config_loader import PAPERS_DIR as _PAPERS_DIR, get_topic_dir
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.config_loader import (  # noqa: E402
+    PAPERS_DIR as _PAPERS_DIR,
+    get_topic_dir,
+    load_config,
+)
+from pipeline.lib.generation_cache import (  # noqa: E402
+    CacheFailure,
+    CacheIdentity,
+    CacheSuccess,
+    GenerationCache,
+    GenerationCacheError,
+)
+from pipeline.providers.codex_gateway import (  # noqa: E402
+    CodexGateway,
+    CodexGatewayError,
+    CodexRole,
+)
+from pipeline.runtime_policy import (  # noqa: E402
+    RuntimePolicy,
+    RuntimePolicyError,
+    resolve_runtime_policy,
+)
+from pipeline.schemas.codex_schema import (  # noqa: E402
+    JsonObject,
+    SchemaError,
+    validate_json,
+)
 
 PAPERS_DIR = str(_PAPERS_DIR)
+SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 
-# SPECTER2 모델 경로 결정.
-# 한국에서 huggingface.co LFS 가 일관되게 막힐 때를 대비해, 프로젝트 .cache/base/ 가
-# 존재하면 거기서 로드 (AWS S3 ai2-s2-research-public 에서 받은 tar 압축 해제 결과).
-# 없으면 HF Hub 이름 fallback — HF cache 가 채워져 있어야 동작.
-_SPECTER2_LOCAL = Path(__file__).resolve().parent.parent / ".cache" / "base"
-SPECTER2_MODEL = str(_SPECTER2_LOCAL) if (_SPECTER2_LOCAL / "config.json").exists() \
-                 else "allenai/specter2_base"
 
-# 서브토픽/카테고리 작명 + 연결 생성에 쓰는 Anthropic 모델.
-LLM_MODEL = os.environ.get("TOPIC_MODELING_LLM_MODEL", "claude-sonnet-5")
+def _load_schema(name: str) -> JsonObject:
+    with (SCHEMA_DIR / name).open("r", encoding="utf-8") as handle:
+        decoded = cast(object, json.load(handle))
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{name} must contain a JSON object")
+    return cast(JsonObject, decoded)
+
+
+SUBTOPIC_SCHEMA: JsonObject = _load_schema("topic-subtopic-label-v1.json")
+CATEGORY_SCHEMA: JsonObject = _load_schema("topic-category-label-v1.json")
+CONNECTION_SCHEMA: JsonObject = _load_schema("topic-connections-v1.json")
+
+
+class TopicSemanticError(ValueError):
+    """A structured topic result violated local semantic invariants."""
+
+
+class TopicGateway(Protocol):
+    def generate_json(
+        self,
+        role: CodexRole,
+        prompt: str,
+        schema: JsonObject,
+    ) -> JsonObject: ...
+
+
+class TopicIdentityFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        runtime_policy: RuntimePolicy,
+        gateway: CodexGateway,
+        role: CodexRole,
+        prompt_version: str,
+        prompt: str,
+        schema_version: str,
+        schema: JsonObject,
+        source: bytes,
+        task_id: str,
+    ) -> CacheIdentity: ...
+
+
+class TopicValidator(Protocol):
+    def __call__(self, value: JsonObject) -> JsonObject: ...
+
+
+@final
+class TopicCodex:
+    """Role-routed, identity-bound structured generation for topic artifacts."""
+
+    def __init__(
+        self,
+        runtime_policy: RuntimePolicy,
+        gateway: TopicGateway,
+        cache: GenerationCache,
+        identity_factory: TopicIdentityFactory = CacheIdentity.from_gateway,
+    ) -> None:
+        self.runtime_policy: RuntimePolicy = runtime_policy
+        self.gateway: TopicGateway = gateway
+        self.cache: GenerationCache = cache
+        self.identity_factory: TopicIdentityFactory = identity_factory
+
+    @classmethod
+    def production(
+        cls,
+        topic_dir: str | Path,
+        runtime_policy: RuntimePolicy,
+    ) -> "TopicCodex":
+        if runtime_policy.mode != "codex":
+            raise GenerationCacheError(
+                "policy-denied",
+                "topic generation requires codex mode",
+            )
+        return cls(
+            runtime_policy,
+            CodexGateway.production(ROOT),
+            GenerationCache(Path(topic_dir) / ".llm_cache"),
+        )
+
+    def generate(
+        self,
+        *,
+        role: CodexRole,
+        prompt: str,
+        schema: JsonObject,
+        schema_version: str,
+        prompt_version: str,
+        source: JsonObject,
+        task_id: str,
+        validator: TopicValidator,
+    ) -> JsonObject:
+        source_bytes = json.dumps(
+            source,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        identity = self.identity_factory(
+            runtime_policy=self.runtime_policy,
+            gateway=cast(CodexGateway, cast(object, self.gateway)),
+            role=role,
+            prompt_version=prompt_version,
+            prompt=prompt,
+            schema_version=schema_version,
+            schema=schema,
+            source=source_bytes,
+            task_id=task_id,
+        )
+
+        def produce() -> CacheSuccess | CacheFailure:
+            try:
+                value = self.gateway.generate_json(role, prompt, schema)
+                return CacheSuccess(validator(value))
+            except (
+                CodexGatewayError,
+                SchemaError,
+                TopicSemanticError,
+                TypeError,
+                ValueError,
+            ):
+                return CacheFailure("failed")
+
+        return validator(self.cache.get_or_generate(identity, produce))
 
 
 def log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
-
-
-def _anthropic_text(resp):
-    """Anthropic content blocks에서 text block만 결합한다.
-
-    claude-sonnet-5 계열이 reasoning/thinking block을 text보다 먼저 줄 수 있는데
-    resp.content[0].text 를 가정하면 ThinkingBlock 에서 AttributeError가 난다.
-    """
-    parts = []
-    for block in getattr(resp, "content", []) or []:
-        if getattr(block, "type", None) == "text" and getattr(block, "text", None):
-            parts.append(block.text)
-    text = "".join(parts).strip()
-    if not text:
-        types = [getattr(b, "type", type(b).__name__) for b in getattr(resp, "content", []) or []]
-        raise RuntimeError(f"Anthropic response contained no text blocks: {types}")
-    return text
 
 
 # ═══════════════════════════════════════════
@@ -67,7 +198,7 @@ def _anthropic_text(resp):
 
 def extract_originalities(topic_papers):
     """각 논문의 text.md 앞 1000자에서 originality 추출."""
-    from lib.originality_extractor import (
+    from pipeline.lib.originality_extractor import (
         _extract_rule_based, _strip_metadata_leaks, load_triggers,
     )
 
@@ -143,7 +274,7 @@ def compute_embeddings(originalities, cache_path=None):
     섞이는 silent corruption 을 막기 위해 캐시를 통째로 무효화하고 전량 재계산한다
     (구 _embeddings_cache.json 은 mean-pooling 벡터라 태그가 없으므로 자동 무효화).
     """
-    from lib import specter2_embed
+    from pipeline.lib import specter2_embed
 
     current_slugs = sorted(originalities.keys())
     current_tag = specter2_embed.EMBED_TAG
@@ -430,24 +561,68 @@ def run_clustering(embeddings, slugs, originalities, min_cluster_size=2,
 # Step 4: Category Naming (Sonnet)
 # ═══════════════════════════════════════════
 
-def name_sub_topics(topic_keywords, topics, client, batch_size=40):
-    """TF-IDF keywords -> Sonnet names fine-grained sub-topics (배치 처리)."""
+def validate_subtopic_labels(value, expected_ids):
+    validate_json(value, SUBTOPIC_SCHEMA)
+    rows = value.get("topics")
+    if not isinstance(rows, list):
+        raise TopicSemanticError("topics must be a list")
+    normalized = {}
+    names = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TopicSemanticError("topic label row must be an object")
+        topic_id = row.get("topic_id")
+        name = row.get("name")
+        description = row.get("description")
+        if (
+            isinstance(topic_id, bool)
+            or not isinstance(topic_id, int)
+            or not isinstance(name, str)
+            or not isinstance(description, str)
+            or topic_id in normalized
+            or name.strip().lower() in names
+        ):
+            raise TopicSemanticError("topic labels must have unique IDs and names")
+        normalized[topic_id] = {
+            "name": name.strip(),
+            "description": description.strip(),
+        }
+        names.add(name.strip().lower())
+    if set(normalized) != set(expected_ids):
+        raise TopicSemanticError("topic label IDs do not match the requested batch")
+    return {"topics": [
+        {
+            "topic_id": topic_id,
+            "name": normalized[topic_id]["name"],
+            "description": normalized[topic_id]["description"],
+        }
+        for topic_id in sorted(normalized)
+    ]}
+
+
+def name_sub_topics(topic_keywords, topics, generator, topic, batch_size=40):
+    """TF-IDF keywords -> short-form strict sub-topic labels."""
     topic_counts = defaultdict(int)
     for t in topics:
         topic_counts[t] += 1
 
     all_tids = sorted(topic_keywords.keys())
     batches = [all_tids[i:i + batch_size] for i in range(0, len(all_tids), batch_size)]
-    log(f"  Naming {len(all_tids)} sub-topics via Sonnet ({len(batches)} batches)...")
+    log(f"  Naming {len(all_tids)} sub-topics via saved-auth Codex "
+        f"({len(batches)} batches)...")
 
     result = {}
     for bi, batch_tids in enumerate(batches):
         prompt_parts = []
+        source_rows = []
         for tid in batch_tids:
             kw_scores = topic_keywords[tid]
             count = topic_counts.get(tid, 0)
             keywords = [w for w, _ in kw_scores[:10]]
             prompt_parts.append(f"Topic {tid} ({count} papers): {', '.join(keywords)}")
+            source_rows.append(
+                {"topic_id": tid, "paper_count": count, "keywords": keywords}
+            )
 
         prompt = f"""Below are fine-grained topic clusters from academic papers, each with top keywords and paper count.
 
@@ -457,10 +632,7 @@ For each topic, create:
 1. A sub-topic name: 2-5 word English academic term (specific, e.g., "Protein Structure Prediction", "Graph Neural Network Scalability")
 2. A one-sentence description
 
-Output ONLY valid JSON:
-{{
-  "{batch_tids[0]}": {{"name": "Sub-topic Name", "description": "One sentence description"}}
-}}
+Return JSON matching the supplied schema. Include one topics row per requested ID.
 
 Rules:
 - Names should be specific and granular (NOT broad like "Machine Learning" or "Deep Learning")
@@ -468,29 +640,26 @@ Rules:
 - Use & for compound concepts only when necessary
 """
 
-        resp = client.messages.create(
-            model=LLM_MODEL,
-            max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}],
+        value = generator.generate(
+            role="short_form",
+            prompt=prompt,
+            schema=SUBTOPIC_SCHEMA,
+            schema_version="topic-subtopic-label-v1",
+            prompt_version="topic-subtopic-label-prompt-v1",
+            source={"topics": source_rows},
+            task_id=(
+                f"topic-subtopic-label:{topic}:"
+                + ",".join(str(tid) for tid in batch_tids)
+            ),
+            validator=lambda candidate, ids=tuple(batch_tids):
+                validate_subtopic_labels(candidate, ids),
         )
-        text = _anthropic_text(resp)
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-
-        try:
-            names = json.loads(text)
-            for tid_str, info in names.items():
-                result[int(tid_str)] = info
-            log(f"    batch {bi+1}/{len(batches)}: {len(names)} named")
-        except json.JSONDecodeError as e:
-            log(f"    batch {bi+1}/{len(batches)} WARNING: JSON parse failed: {e}")
-            for tid in batch_tids:
-                if tid not in result:
-                    kw = topic_keywords[tid]
-                    result[tid] = {"name": f"Topic {tid}: {', '.join(w for w, _ in kw[:3])}", "description": ""}
-        time.sleep(0.5)
+        for row in value["topics"]:
+            result[int(row["topic_id"])] = {
+                "name": row["name"],
+                "description": row["description"],
+            }
+        log(f"    batch {bi+1}/{len(batches)}: {len(value['topics'])} named")
 
     return result
 
@@ -499,13 +668,72 @@ Rules:
 # Step 4.5: Group Sub-topics into Categories
 # ═══════════════════════════════════════════
 
+def validate_category_labels(value, expected_ids):
+    validate_json(value, CATEGORY_SCHEMA)
+    rows = value.get("categories")
+    if not isinstance(rows, list):
+        raise TopicSemanticError("categories must be a list")
+    normalized = {}
+    names = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TopicSemanticError("category label row must be an object")
+        category_id = row.get("category_id")
+        name = row.get("name")
+        description = row.get("description")
+        if (
+            isinstance(category_id, bool)
+            or not isinstance(category_id, int)
+            or not isinstance(name, str)
+            or not isinstance(description, str)
+            or category_id in normalized
+            or name.strip().lower() in names
+        ):
+            raise TopicSemanticError("category labels must have unique IDs and names")
+        normalized[category_id] = {
+            "name": name.strip(),
+            "description": description.strip(),
+        }
+        names.add(name.strip().lower())
+    if set(normalized) != set(expected_ids):
+        raise TopicSemanticError("category IDs do not match the local hierarchy")
+    return {"categories": [
+        {
+            "category_id": category_id,
+            "name": normalized[category_id]["name"],
+            "description": normalized[category_id]["description"],
+        }
+        for category_id in sorted(normalized)
+    ]}
+
+
+def generate_category_labels(generator, topic, prompt, source_groups, category_ids):
+    if generator is None:
+        raise TopicSemanticError("category label generator is required")
+    value = generator.generate(
+        role="short_form",
+        prompt=prompt,
+        schema=CATEGORY_SCHEMA,
+        schema_version="topic-category-label-v1",
+        prompt_version="topic-category-label-prompt-v1",
+        source={"categories": source_groups},
+        task_id=f"topic-category-label:{topic}",
+        validator=lambda candidate, ids=tuple(sorted(category_ids)):
+            validate_category_labels(candidate, ids),
+    )
+    return {
+        str(row["category_id"]): row
+        for row in value["categories"]
+    }
+
+
 def group_into_categories(sub_topic_names, topics, centroids,
-                          min_cats=8, max_cats=12, client=None):
+                          min_cats=8, max_cats=12, generator=None, topic=""):
     """Sub-topic centroid의 cosine distance + average linkage로 카테고리 그룹핑.
 
     1. centroid 간 cosine distance → scipy average linkage hierarchy
     2. fcluster로 min_cats~max_cats 범위에서 자르기
-    3. Sonnet이 각 카테고리에 이름만 부여 (그룹핑은 하지 않음)
+    3. saved-auth Codex가 각 카테고리에 이름만 부여 (그룹핑은 하지 않음)
     """
     from sklearn.metrics.pairwise import cosine_distances
     from scipy.cluster.hierarchy import linkage, fcluster
@@ -564,12 +792,13 @@ def group_into_categories(sub_topic_names, topics, centroids,
         names = [sub_topic_names[tid]['name'] for tid in members if tid in sub_topic_names]
         log(f"    cat {catid} ({len(members)} sub-topics): {', '.join(names[:4])}...")
 
-    # Sonnet이 각 카테고리에 이름 부여 (그룹핑은 이미 완료)
+    # saved-auth Codex가 각 카테고리에 이름 부여 (그룹핑은 이미 완료)
     topic_counts = defaultdict(int)
     for t in topics:
         topic_counts[t] += 1
 
     prompt_parts = []
+    source_groups = []
     for catid, members in sorted(cat_groups.items()):
         member_descs = []
         for tid in members:
@@ -577,6 +806,16 @@ def group_into_categories(sub_topic_names, topics, centroids,
             count = topic_counts.get(tid, 0)
             member_descs.append(f"    - \"{info.get('name', f'Topic {tid}')}\" ({count} papers)")
         prompt_parts.append(f"  Category {catid} ({len(members)} sub-topics):\n" + "\n".join(member_descs))
+        source_groups.append(
+            {
+                "category_id": int(catid),
+                "member_topic_ids": sorted(int(tid) for tid in members),
+                "member_names": [
+                    sub_topic_names.get(tid, {}).get("name", f"Topic {tid}")
+                    for tid in members
+                ],
+            }
+        )
 
     prompt = f"""Below are {n_cats} category groups, each containing related sub-topic clusters.
 The groups were formed by hierarchical clustering on embedding similarity.
@@ -584,11 +823,7 @@ Name each category.
 
 {chr(10).join(prompt_parts)}
 
-Output ONLY valid JSON:
-{{
-  "1": {{"name": "Category Name", "description": "One sentence description"}},
-  "2": {{"name": "Category Name", "description": "One sentence description"}}
-}}
+Return JSON matching the supplied schema with one categories row per group.
 
 Rules:
 - Category names: 3-6 word English academic terms
@@ -596,19 +831,14 @@ Rules:
 - Names should reflect the common theme of the sub-topics in that group
 """
 
-    log(f"  Naming {n_cats} categories via Sonnet...")
-    resp = client.messages.create(
-        model=LLM_MODEL,
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}],
+    log(f"  Naming {n_cats} categories via saved-auth Codex...")
+    cat_names = generate_category_labels(
+        generator,
+        topic,
+        prompt,
+        source_groups,
+        cat_groups,
     )
-    text = _anthropic_text(resp)
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-
-    cat_names = json.loads(text)
 
     # Build tid → category_name mapping
     tid_to_cat = {}
@@ -709,267 +939,159 @@ def compute_related_candidates(embeddings, slugs, top_k=5):
     return candidates
 
 
-def generate_connections_from_candidates(candidates, topic_papers, client,
-                                         batch_size=25, deadline_s=300, max_rounds=3,
-                                         local_fallback=None, priority_slugs=None,
-                                         request_timeout_s=90.0):
-    """임베딩 top-20 후보 -> Sonnet이 이유/관계 작성.
+def validate_connection_decisions(value, expected_candidates):
+    validate_json(value, CONNECTION_SCHEMA)
+    rows = value.get("decisions")
+    if not isinstance(rows, list):
+        raise TopicSemanticError("decisions must be a list")
+    normalized = []
+    seen_sources = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TopicSemanticError("connection decision must be an object")
+        source = row.get("source")
+        connections = row.get("connections")
+        if not isinstance(source, str) or not isinstance(connections, list):
+            raise TopicSemanticError("connection decision fields are invalid")
+        if source in seen_sources or source not in expected_candidates:
+            raise TopicSemanticError("connection source is duplicate or unknown")
+        seen_sources.add(source)
+        targets = set()
+        normalized_connections = []
+        for connection in connections:
+            if not isinstance(connection, dict):
+                raise TopicSemanticError("connection must be an object")
+            target = connection.get("target")
+            relation = connection.get("relation")
+            reason = connection.get("reason")
+            if (
+                not isinstance(target, str)
+                or target == source
+                or target not in expected_candidates[source]
+                or target in targets
+                or not isinstance(relation, str)
+                or not isinstance(reason, str)
+                or re.search(r"[가-힣]", reason) is None
+            ):
+                raise TopicSemanticError("connection target, relation, or reason is invalid")
+            targets.add(target)
+            normalized_connections.append(
+                {"target": target, "relation": relation, "reason": reason.strip()}
+            )
+        normalized.append({"source": source, "connections": normalized_connections})
+    if seen_sources != set(expected_candidates):
+        raise TopicSemanticError("connection decisions do not cover the requested batch")
+    return {"decisions": normalized}
 
-    BEST-EFFORT + 행 방지: 연결은 정규 사이클의 ``extract_insights --only
-    connections`` 가 다시 채우므로, 한국망↔Anthropic 의 stale-connection(half-open
-    소켓) 으로 *토픽 모델링 전체가 멈추면 안 된다*. 과거엔 막힌 배치 하나가
-    client 의 max_retries(4) × timeout(180s) = 12분을 잡고, 게다가 ``with
-    ThreadPoolExecutor`` 의 암묵적 ``shutdown(wait=True)`` 가 그 좀비 워커를 join
-    하면서 런 전체를 영구히 정지시켰다(메인스레드가 lock 대기에 묶임). 영구 수정:
-      1) 이 단계 전용 client 는 ``timeout=90, max_retries=1`` 로 막힌 호출을 ~3분
-         안에 끝낸다.
-      2) 라운드마다 wall-clock ``deadline_s`` 를 둬, 그 안에 끝난 배치만 쓴다.
-      3) ``shutdown(wait=False, cancel_futures=True)`` — 좀비 워커를 join 하지
-         않는다(아직 시작 안 한 배치는 취소; 도는 워커는 짧은 timeout 으로 곧 끝남).
-      4) MULTI-ROUND: 한 라운드를 돈 뒤 *막혀서 처리 못 한 논문만* 골라 다음
-         라운드에서 재시도한다(최대 ``max_rounds``). 네트워크가 잠깐 느렸을 뿐이면
-         2라운드에서 대개 완결되고, 끝까지 막힌 논문만 기존 연결을 유지한 채
-         남는다. 성공한 배치의 논문은 *결과가 비어도* '처리됨' 으로 봐서(연결이
-         없는 게 정상인 논문) 재시도 루프가 무한반복되지 않는다.
-      5) LOCAL FALLBACK (opt-in): ``local_fallback`` 가 주어지면, max_rounds 를
-         다 돌고도 남은 papers 를 *로컬에서 도는 OpenAI 호환 모델* 로 마저
-         연결한다. 클라우드 키·네트워크가 끝까지 막힌 환경에서 사용자가
-         ``--local-fallback`` 으로 켰을 때만 동작하며, 엔드포인트가 응답 없으면
-         조용히 건너뛴다(런은 절대 막지 않는다). lib/local_llm 참조.
-      6) PRIORITY-FIRST: ``priority_slugs``(기존 연결이 0개인 논문 — 대개 신규)
-         를 매 라운드 큐의 *맨 앞* 에 배치한다. 배치가 슬러그 정렬순으로 제출되면
-         번호 큰 신규 논문이 항상 꼬리에 몰려, deadline 이 잘릴 때마다 같은
-         논문들이 반복 탈락하는 체계적 편향이 생긴다(2026-06-12 실측: ai4s 신규
-         6편이 두 런 연속 탈락). 망 예산이 부족해도 사용자에게 공백으로 보이는
-         논문부터 먼저 채운다.
-    """
-    from concurrent.futures import (ThreadPoolExecutor, FIRST_COMPLETED,
-                                    wait as _futures_wait)
 
-    # 막힌 호출이 토픽모델링을 오래 잡지 않게 짧은 timeout/무재시도 클라이언트.
-    conn_client = client.with_options(timeout=request_timeout_s, max_retries=1)
-
-    slug_to_paper = {p["slug"]: p for p in topic_papers}
-    num_to_slug = {p["slug"].split("_")[0]: p["slug"] for p in topic_papers}
+def generate_connections_from_candidates(
+    candidates,
+    topic_papers,
+    generator,
+    topic,
+    batch_size=25,
+    priority_slugs=None,
+):
+    """Select candidate edges through cached long-form Codex decisions only."""
+    slug_to_paper = {paper["slug"]: paper for paper in topic_papers}
+    num_to_slug = {slug.split("_")[0]: slug for slug in slug_to_paper}
     all_connections = {}
-    all_slugs = sorted(candidates.keys())
-    log(f"  {len(all_slugs)} papers, batch_size={batch_size}, "
-        f"<= {max_rounds} rounds × {deadline_s}s ...")
-
-    def _build_prompt(batch_slugs):
-        papers_block = []
+    completed_slugs = set()
+    priority = priority_slugs or set()
+    ordered_slugs = sorted(
+        candidates,
+        key=lambda slug: (0 if slug in priority else 1, slug),
+    )
+    batches = [
+        ordered_slugs[index:index + batch_size]
+        for index in range(0, len(ordered_slugs), batch_size)
+    ]
+    for batch_index, batch_slugs in enumerate(batches):
+        prompt_rows = []
+        source_rows = []
+        expected = {}
         for slug in batch_slugs:
-            p = slug_to_paper.get(slug, {})
-            num = slug.split("_")[0]
-            title = p.get("title", "")[:60]
-            essence = p.get("essence", "")[:150]
-            cands = candidates.get(slug, [])
-            cand_text = ", ".join(
-                f"[{cs.split('_')[0]}]({sim:.2f})" for cs, sim in cands[:10]
+            paper = slug_to_paper.get(slug, {})
+            source = slug.split("_")[0]
+            candidate_rows = [
+                {"target": candidate.split("_")[0], "similarity": round(float(score), 6)}
+                for candidate, score in candidates.get(slug, [])[:10]
+                if candidate.split("_")[0] in num_to_slug
+            ]
+            expected[source] = {row["target"] for row in candidate_rows}
+            source_rows.append(
+                {
+                    "source": source,
+                    "title": str(paper.get("title", ""))[:60],
+                    "essence": str(paper.get("essence", ""))[:150],
+                    "candidates": candidate_rows,
+                }
             )
-            papers_block.append(
-                f"[{num}] {title} | {essence}\n  Candidates: {cand_text}"
+            prompt_rows.append(
+                f"[{source}] {paper.get('title', '')} | candidates: "
+                + ", ".join(row["target"] for row in candidate_rows)
             )
+        prompt = f"""For every source paper below, decide zero or more meaningful candidate connections.
 
-        return f"""For each paper below, select the most meaningful related papers from its candidates.
-Candidates are sorted by embedding similarity (score in parentheses).
+{chr(10).join(prompt_rows)}
 
-Papers:
-{chr(10).join(papers_block)}
-
-Connection types:
-- alternative: Same problem, different approach
-- extension: Builds on or extends this work
-- foundation: Theoretical/methodological foundation
-- counterpoint: Opposite perspective or critiques
-- application: Applies this method to a real problem
-
-Output ONLY valid JSON:
-{{
-  "045": [
-    {{"target": "123", "relation": "alternative", "reason": "한국어 이유 1문장"}}
-  ]
-}}
-
-Rules:
-- reason은 한국어로 구체적으로 (1문장)
-- 유사도가 높아도 의미 없는 연결은 제외
-- target은 candidate 목록의 논문 번호만 사용"""
-
-    def process_batch(batch_slugs):
-        prompt = _build_prompt(batch_slugs)
-        resp = conn_client.messages.create(
-            model=LLM_MODEL,
-            # batch_size=25 × 후보 다수 선택 + 한국어 이유의 JSON 출력은 10k 토큰을
-            # 넘겨 응답이 잘리고(Unterminated string) 배치 전체가 버려진다. 25편을
-            # 여유 있게 담도록 상향.
-            max_tokens=16000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        parts = []
-        for block in (getattr(resp, "content", None) or []):
-            text_part = getattr(block, "text", None)
-            if text_part:
-                parts.append(text_part)
-            elif isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
-                parts.append(block["text"])
-        if not parts:
-            raise ValueError("Anthropic response contained no text block")
-        text = "\n".join(parts).strip()
-        if text.startswith("```"):
-            text = text[3:].strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
-            if text.endswith("```"):
-                text = text[:-3].strip()
-        return json.loads(text)
-
-    def _merge(batch_result):
-        for num, conns in batch_result.items():
-            slug = num_to_slug.get(num)
-            if not slug:
-                continue
-            resolved = []
-            for c in conns:
-                target_slug = num_to_slug.get(c.get("target", ""))
-                if target_slug:
-                    resolved.append({
-                        "slug": target_slug,
-                        "relation": c.get("relation", "alternative"),
-                        "reason": c.get("reason", ""),
-                    })
-            if resolved:
-                existing = all_connections.get(slug, [])
-                seen = {r["slug"] for r in existing}
-                for r in resolved:
-                    if r["slug"] not in seen:
-                        existing.append(r)
-                        seen.add(r["slug"])
-                all_connections[slug] = existing
-
-    all_slug_set = set(all_slugs)
-    attempted = set()  # 배치가 성공적으로 끝난 슬러그 (연결 0개여도 포함 → 재시도 X)
-
-    def _run_round(todo):
-        """todo 슬러그를 배치로 나눠 한 라운드 처리. deadline_s 안에 끝난 배치만
-        수집하고 성공 배치의 슬러그를 attempted 에 기록. 막힌 워커는 join 안 함."""
-        round_batches = [todo[i:i + batch_size]
-                         for i in range(0, len(todo), batch_size)]
-        executor = ThreadPoolExecutor(max_workers=4)
-        round_deadline = time.monotonic() + deadline_s
+Relations: alternative, extension, foundation, counterpoint, application.
+Reasons must be one concrete Korean sentence. Return JSON matching the supplied schema.
+"""
+        task_digest = hashlib.sha256(
+            ",".join(batch_slugs).encode("utf-8")
+        ).hexdigest()[:16]
         try:
-            futures = {executor.submit(process_batch, b): tuple(b)
-                       for b in round_batches}
-            pending = set(futures)
-            while pending:
-                remaining = round_deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                done, pending = _futures_wait(
-                    pending, timeout=min(remaining, 30.0),
-                    return_when=FIRST_COMPLETED)
-                for future in done:
-                    bslugs = futures[future]
-                    try:
-                        _merge(future.result())
-                        attempted.update(bslugs)   # 성공 → 다음 라운드에서 제외
-                    except Exception as e:
-                        log(f"    batch ERROR (재시도 대상): {str(e)[:90]}")
-        finally:
-            # 좀비 워커를 join 하지 않는다(=런이 멈추지 않게). 시작 안 한 배치는
-            # 취소; 도는 워커는 conn_client 의 짧은 timeout 안에서 스스로 끝난다.
-            executor.shutdown(wait=False, cancel_futures=True)
-
-    prio = set(priority_slugs or ())
-
-    def _ordered(slug_set):
-        """기존 연결 0개(신규) 논문을 큐 맨 앞에 — 잘려도 공백부터 채운다."""
-        return sorted(slug_set, key=lambda s: (s not in prio, s))
-
-    if prio:
-        log(f"  [connections] priority-first: 연결 없는 {len(prio & all_slug_set)} "
-            f"papers 를 첫 배치로")
-
-    for rnd in range(max_rounds):
-        todo = _ordered(all_slug_set - attempted)
-        if not todo:
-            break
-        if rnd:
-            log(f"  [connections] round {rnd + 1}/{max_rounds}: "
-                f"{len(todo)} papers 재시도 (막힌/실패 배치만)")
-        _run_round(todo)
-
-    def _run_local_fallback(todo, cfg):
-        """남은 papers 를 로컬 OpenAI 호환 모델로 마저 연결. 성공분은 attempted 에
-        기록하고 _merge 로 합친다. 엔드포인트가 응답 없거나 SDK 가 없으면 todo 를
-        그대로(미완) 돌려준다 — 런은 절대 막지 않는다."""
-        from lib import local_llm
-        base_url, model = cfg["base_url"], cfg["model"]
-        if not local_llm.probe(base_url):
-            log(f"  [connections] local-fallback: {base_url} 응답 없음 — 건너뜀")
-            return set(todo)
-        # Ollama 면 네이티브 /api/chat (요청 단위 num_ctx + 정식 think:false),
-        # 그 외(LM Studio/llama.cpp/vLLM)는 OpenAI 호환 경로.
-        use_native = local_llm.detect_ollama(base_url)
-        lc = None
-        if not use_native:
-            lc = local_llm.get_client(cfg)
-            if lc is None:
-                log("  [connections] local-fallback: openai SDK 로드 실패 — 건너뜀")
-                return set(todo)
-        lbatch = max(1, int(cfg.get("batch_size", 8)))   # 로컬은 작은 배치가 안정적
-        lretries = max(1, int(cfg.get("retries", 2)))    # 형식 깨짐은 확률적 → 재시도
-        log(f"  [connections] local-fallback: {len(todo)} papers → {model} "
-            f"@ {base_url} (batch={lbatch}, native={use_native})")
-        done_n = 0
-        for i in range(0, len(todo), lbatch):
-            batch = todo[i:i + lbatch]
-            for attempt in range(lretries):
-                try:
-                    if use_native:
-                        result = local_llm.chat_json_native(
-                            base_url, model, _build_prompt(batch),
-                            num_ctx=int(cfg.get("num_ctx", 8192)),
-                            timeout=float(cfg.get("timeout", 600)))
-                    else:
-                        result = local_llm.chat_json(
-                            lc, model, _build_prompt(batch),
-                            reasoning_effort=cfg.get("reasoning_effort"),
-                            json_mode=bool(cfg.get("json_mode")))
-                    _merge(result)
-                    attempted.update(batch)   # 연결 0개여도 '처리됨'
-                    done_n += len(batch)
-                    break
-                except Exception as e:
-                    tag = "재시도" if attempt + 1 < lretries else "포기"
-                    log(f"    local batch ERROR ({tag}): {str(e)[:90]}")
-        log(f"  [connections] local-fallback: {done_n}/{len(todo)} papers 처리")
-        return all_slug_set - attempted
-
-    missing = all_slug_set - attempted
-
-    # opt-in: 끝까지 막힌 잔여분을 로컬 모델로 마저 연결 (클라우드 키·네트워크 불필요)
-    if missing and local_fallback:
-        missing = _run_local_fallback(_ordered(missing), local_fallback)
-
-    if missing:
-        log(f"  [connections] {len(missing)} papers 미완 — 기존 연결 유지, "
-            f"extract_insights 가 정규 사이클에 갱신")
-    else:
-        log(f"  [connections] {len(all_slug_set)} papers 전부 처리 완료")
-
-    return all_connections
-
-
-# ═══════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════
+            value = generator.generate(
+                role="long_form",
+                prompt=prompt,
+                schema=CONNECTION_SCHEMA,
+                schema_version="topic-connections-v1",
+                prompt_version="topic-connections-prompt-v1",
+                source={"papers": source_rows},
+                task_id=f"topic-connections:{topic}:{task_digest}",
+                validator=lambda candidate, allowed=expected:
+                    validate_connection_decisions(candidate, allowed),
+            )
+        except GenerationCacheError as error:
+            log(f"  [connections] batch {batch_index + 1} failed: {error.code}")
+            continue
+        for decision in value["decisions"]:
+            source_slug = num_to_slug.get(decision["source"])
+            if source_slug is None:
+                continue
+            completed_slugs.add(source_slug)
+            all_connections[source_slug] = [
+                {
+                    "slug": num_to_slug[connection["target"]],
+                    "relation": connection["relation"],
+                    "reason": connection["reason"],
+                }
+                for connection in decision["connections"]
+                if connection["target"] in num_to_slug
+            ]
+        log(
+            f"  [connections] batch {batch_index + 1}/{len(batches)}: "
+            f"{len(batch_slugs)} reviewed"
+        )
+    return all_connections, completed_slugs
 
 def _run_topic_model(topic="ai4s", *, skip_connections=False,
                       skip_classification=False, min_cats=8, max_cats=12,
-                      local_fallback=None):
+                      runtime_policy=None, generator=None):
     """Programmatic entrypoint for topic_modeling."""
     topic_dir = str(get_topic_dir(topic))
+    policy = runtime_policy or resolve_runtime_policy(load_config())
+    generation_needed = not skip_classification or not skip_connections
+    if generation_needed and policy.mode != "codex" and generator is None:
+        log("  Topic generation unavailable: runtime mode is off")
+        return {"status": "unavailable", "reason": "runtime-off"}
+
+    from pipeline.lib import specter2_embed
+    cache_status = specter2_embed.local_cache_status()
+    if not cache_status["available"]:
+        log("  Topic modeling unavailable: local SPECTER2 cache is missing or invalid")
+        return {"status": "unavailable", "reason": "specter2-cache-unavailable"}
 
     log(f"Loading {topic} data...")
     with open(os.path.join(PAPERS_DIR, "_papers_index.json"), "r", encoding="utf-8") as f:
@@ -999,26 +1121,39 @@ def _run_topic_model(topic="ai4s", *, skip_connections=False,
         embeddings, slugs, originalities
     )
 
-    from anthropic import Anthropic
-    client = Anthropic(timeout=180.0, max_retries=4)
+    if generation_needed and generator is None:
+        generator = TopicCodex.production(topic_dir, policy)
 
     if skip_classification:
         log("\n  [Steps 4-5] SKIP (--skip-classification: preserving existing categories)")
     else:
         # Step 4: Name sub-topics
         log("\n" + "=" * 50)
-        log("STEP 4: SUB-TOPIC NAMING (Sonnet)")
+        log("STEP 4: SUB-TOPIC NAMING (saved-auth Codex)")
         log("=" * 50)
-        topic_names = name_sub_topics(topic_keywords, topics, client)
+        topic_names = name_sub_topics(
+            topic_keywords,
+            topics,
+            generator,
+            topic,
+        )
         for tid, info in sorted(topic_names.items()):
             count = sum(1 for t in topics if t == tid)
             log(f"  [{tid}] {info['name']} ({count} papers)")
 
         # Step 4.5: Group sub-topics into categories
         log("\n" + "=" * 50)
-        log("STEP 4.5: GROUPING SUB-TOPICS INTO CATEGORIES (Sonnet)")
+        log("STEP 4.5: GROUPING SUB-TOPICS INTO CATEGORIES (saved-auth Codex)")
         log("=" * 50)
-        tid_to_cat, cat_info = group_into_categories(topic_names, topics, centroids, min_cats, max_cats, client)
+        tid_to_cat, cat_info = group_into_categories(
+            topic_names,
+            topics,
+            centroids,
+            min_cats,
+            max_cats,
+            generator,
+            topic,
+        )
         for cat_name, desc in sorted(cat_info.items()):
             count = sum(1 for tid, cat in tid_to_cat.items() if cat == cat_name)
             log(f"  [{cat_name}] {count} sub-topics")
@@ -1103,7 +1238,7 @@ def _run_topic_model(topic="ai4s", *, skip_connections=False,
         #   - tid_to_cat[tid]     → parent category name
         #   - centroids[tid]      → outlier fallback + all_categories top-N (cosine on 768D)
         import joblib
-        from lib import specter2_embed
+        from pipeline.lib import specter2_embed
         bundle = {
             "hdbscan_model": hdbscan_model,
             "umap_cluster": umap_cluster,
@@ -1148,8 +1283,8 @@ def _run_topic_model(topic="ai4s", *, skip_connections=False,
         # 논문만 LLM 호출. 변화 없는 논문은 건너뛰고 sync 의 bidi 재구성으로 inbound
         # 만 무료 갱신. CONN_INCREMENTAL=0/off → full(기존 동작), CONN_FULL_REBUILD=1
         # → 강제 full. 오류 시 안전하게 full 로 fallback.
-        from lib import conn_cache
-        from lib import specter2_embed
+        from pipeline.lib import conn_cache
+        from pipeline.lib import specter2_embed
         _inc_on = os.environ.get("CONN_INCREMENTAL", "1").strip().lower() \
             not in ("0", "off", "false", "no")
         _full_rebuild = os.environ.get("CONN_FULL_REBUILD", "").strip().lower() \
@@ -1171,32 +1306,19 @@ def _run_topic_model(topic="ai4s", *, skip_connections=False,
         priority_slugs = {s for s in gen_candidates if not _edata.get(s)}
 
         if gen_candidates:
-            connections = generate_connections_from_candidates(
-                gen_candidates, topic_papers, client, local_fallback=local_fallback,
-                priority_slugs=priority_slugs
+            connections, completed_slugs = generate_connections_from_candidates(
+                gen_candidates,
+                topic_papers,
+                generator,
+                topic,
+                priority_slugs=priority_slugs,
             )
         else:
             log("  [conn] 0 dirty — LLM 호출 생략, consumer view 만 재구성")
             connections = {}
-        # 캐시 갱신 기준은 verify 가 깎기 *전* 의 raw 생성 결과 키 — verify 가 제거한
-        # spurious slug 도 '생성됨' 으로 봐 무한 재시도를 막는다.
-        _generated = set(connections.keys())
-        # T2-4: optional LLM audit of generated connections. Env VERIFY_CONNECTIONS
-        # (off|sample|strict, default sample) — sample = flag-only (log spurious,
-        # keep all); strict = drop spurious before persistence. Best-effort: any
-        # error/missing client leaves connections untouched (never blocks the run).
-        try:
-            from lib import verify
-            essence_by_slug = {
-                p["slug"]: {"title": p.get("title", ""),
-                            "essence": p.get("essence", "")}
-                for p in topic_papers
-            }
-            verify.apply_connection_verification(
-                connections, essence_by_slug, client, log=log)
-        except Exception as e:
-            log(f"  [verify] connections hook skipped: {str(e)[:80]}")
-        from lib.connections import sync_topic_connections
+            completed_slugs = set()
+        _generated = completed_slugs
+        from pipeline.lib.connections import sync_topic_connections
         sync_topic_connections(connections, topic, slugs, topic_dir, log=log)
         # 성공 시에만 캐시 갱신. 실제 생성된 slug 만 current set 으로 올리고, dirty
         # 였지만 결과를 못 받은 slug 은 prev set 유지 → 다음 run 재시도(실패 런 미저장).
@@ -1216,6 +1338,7 @@ def _run_topic_model(topic="ai4s", *, skip_connections=False,
     log(f"  UMAP: {umap_path}")
     log(f"  Cache: {cache_path}")
     log("=" * 50)
+    return {"status": "ok"}
 
 
 def main():
@@ -1226,30 +1349,32 @@ def main():
                         help="Skip Steps 4-5 (naming/grouping/assignment). Run embedding, UMAP, connections only.")
     parser.add_argument("--min-cats", type=int, default=8)
     parser.add_argument("--max-cats", type=int, default=12)
-    parser.add_argument("--local-fallback", action="store_true",
-                        help="max retry round 를 다 돌고도 연결 못 한 papers 를 "
-                             "로컬 OpenAI 호환 모델(Ollama/LM Studio/llama.cpp/vLLM)로 "
-                             "마저 연결한다. config.json 의 local_model 블록 또는 "
-                             "LOCAL_MODEL_BASE_URL/LOCAL_MODEL_NAME 환경변수 필요.")
+    parser.add_argument("--llm-mode", default=None)
     args = parser.parse_args()
 
-    local_fallback = None
-    if args.local_fallback:
-        from config_loader import get_local_model_config
-        local_fallback = get_local_model_config()
-        if local_fallback is None:
-            print("[local-fallback] 설정 없음 — config.json 의 local_model 또는 "
-                  "LOCAL_MODEL_BASE_URL + LOCAL_MODEL_NAME 환경변수를 설정하세요. "
-                  "이번 실행은 로컬 fallback 없이 진행합니다.", flush=True)
-
-    _run_topic_model(topic=args.topic,
-                     skip_connections=args.skip_connections,
-                     skip_classification=args.skip_classification,
-                     min_cats=args.min_cats, max_cats=args.max_cats,
-                     local_fallback=local_fallback)
+    try:
+        policy = resolve_runtime_policy(load_config(), args.llm_mode)
+        result = _run_topic_model(
+            topic=args.topic,
+            skip_connections=args.skip_connections,
+            skip_classification=args.skip_classification,
+            min_cats=args.min_cats,
+            max_cats=args.max_cats,
+            runtime_policy=policy,
+        )
+    except RuntimePolicyError as error:
+        print(f"Runtime policy denied: {error.code}", file=sys.stderr)
+        return 2
+    except GenerationCacheError as error:
+        print(f"Topic generation failed: {error.code}", file=sys.stderr)
+        return 2
+    except TopicSemanticError:
+        print("Topic generation failed: semantic-invalid", file=sys.stderr)
+        return 2
+    return 0 if result.get("status") == "ok" else 2
 
 
 if __name__ == "__main__":
-    from _env_guard import force_py312
+    from pipeline._env_guard import force_py312
     force_py312()
-    main()
+    raise SystemExit(main())

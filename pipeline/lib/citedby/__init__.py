@@ -17,6 +17,13 @@ from __future__ import annotations
 
 import importlib
 
+from pipeline.secondary_capability_guard import deny as _deny
+
+
+def run_citedby(*_args: object, **_kwargs: object) -> object:
+    _ = (_args, _kwargs)
+    return _deny("citedby-analysis")
+
 __all__ = [
     # citing.py — 인용논문 수집
     "CITING_COLUMNS",

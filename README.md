@@ -2,7 +2,7 @@
 
 **Zotero 컬렉션에 PDF만 있으면, 나머지는 자동입니다.**
 
-논문 PDF → 한국어 구조화 리뷰 → 자동 분류 → 연구 동향 타임라인 → 검색 가능한 사이트 + **Deep Research**(논문 근거 RAG Q&A)까지 — Claude Code가 오케스트레이션하는 개인 논문 큐레이션 파이프라인.
+논문 PDF → 한국어 구조화 리뷰 → 자동 분류 → 연구 동향 타임라인 → 검색 가능한 사이트 + **Deep Research**(논문 근거 RAG Q&A)까지 — **로컬 Codex(ChatGPT 로그인)** 가 오케스트레이션하는 개인 논문 큐레이션 파이프라인.
 
 **라이브 데모 — 설치 없이 바로 보기:**
 
@@ -11,13 +11,66 @@
 
 **핵심 기능 5줄 요약:**
 
-- **리뷰 자동화** — PDF에서 텍스트·Figure를 추출해 Claude가 6개 섹션 한국어 리뷰를 자동 작성
+- **리뷰 자동화** — PDF에서 텍스트·Figure를 추출해 Codex가 6개 섹션 한국어 리뷰를 자동 작성
 - **분류·네트워크** — SPECTER2 + HDBSCAN + UMAP로 카테고리를 자동 생성·배정하고 D3.js 인터랙티브 네트워크로 시각화
-- **Deep Research RAG** — 자연어 질의 → hybrid 검색(BM25+dense) → LLM 답변 + `[N]` 인용, 필요하면 **웹 검색 토글**로 코퍼스 밖 근거까지
-- **Audio Overview** — 리뷰·답변을 팟캐스트형 한국어 오디오로(Gemini TTS → 브라우저 MP3, 배포 시 이메일)
+- **Deep Research RAG** — 자연어 질의 → BM25 검색(선택: dense 하이브리드) → LLM 답변 + `[N]` 인용, 필요하면 **웹 검색 토글**로 코퍼스 밖 근거까지
+- **Audio Overview** — 리뷰·답변을 팟캐스트형 한국어 오디오로(Gemini TTS → 브라우저 MP3, 로컬)
 - **[paper-curio](https://github.com/jehyunlee/paper-curio)** — Zotero 플러그인에서 PDF AI Chat, 2~6편 비교 리포트, 컬렉션 우클릭 전체 처리(리뷰·분류·내러티브·main/category 타임라인, 배포 제외)
 
 🇬🇧 [English README](README.en.md)
+
+## 릴리스 상태 및 버전 관리
+
+현재 프로젝트 버전은 **0.2.0**입니다. 정확한 버전은 저장소 루트의
+[`VERSION`](VERSION) 파일이 단일 기준이며, 변경 내역은
+[`CHANGELOG.md`](CHANGELOG.md)에 기록합니다.
+
+### 0.2.0 — 2026-08-13
+
+이번 릴리스는 **실제 사용 환경(36편 Zotero 컬렉션)에서 첫 end-to-end 실행**을
+완료하면서 발견된 문제를 모두 고치고, 초보자도 쉽게 시작할 수 있게 만들었습니다.
+
+- **LLM 위자드 설치** — README/AGENTS.md에 “설치해줘” 한 줄만으로
+  step-by-step(Codex 로그인 → Zotero 컬렉션 → 토픽 alias → PDF 폴더)을
+  진행하는 대화형 설치 흐름을 정의했습니다.
+- **API 키 없이 시작** — 로컬 Zotero(`zotero.sqlite`)에서 컬렉션 목록과
+  PDF 동기화 상태를 읽는 `inspect_local_zotero.py`를 추가해, Zotero 초보나
+  키 발급이 어려운 사용자도 안내받으며 진행할 수 있습니다.
+- **실행 차단 버그 수정** — 모듈 경로, Zotero 클라우드 PDF 매칭, 리뷰
+  frontmatter, 분류/연결/RSS 검증, SPECTER2 어댑터 레이아웃, 전체 sha256
+  인덱스 등을 수정했습니다. 자세한 내역은 [CHANGELOG.md](CHANGELOG.md).
+- **실측 검증** — `고령치매2025_1` 컬렉션(36편 중 PDF 19편)으로
+  리뷰→분류→타임라인→HTML→BM25→RSS까지 `status: succeeded` 확인,
+  로컬 서버·검색·Deep Research 답변 API 정상 동작 확인.
+
+### 0.1.0 — 2026-08-08
+
+이번 릴리스에서 다음 작업을 완료했습니다.
+
+- Codex saved-auth(ChatGPT 로그인) 기반 Terra/Luna 생성 게이트웨이와
+  유료 API fallback 영구 차단
+- setup/doctor/run_full의 fail-closed 정책 및 감사 가능한 release evidence
+- BM25 기본 검색과 local Deep Research answer 서버
+- one-paper fixture 기반 curation/cache/resume/release 검증
+- Codex CLI `0.147.0` signed boundary 재검증
+- release gate evidence `238 passed, 0 failed, 0 skipped`, F1~F4 최종 검토 PASS
+
+> 참고: 고정 환경에서 전체 `unittest discover`를 실행하면 release gate 밖의
+> 기존 metrics 테스트가 추가로 수집됩니다. 현재 `python-dateutil` 환경 누락과
+> 오래된 pipeline wiring assertion 3 errors/1 failure가 남아 있으며, 이번
+> 릴리스 변경에서 발생한 회귀는 아닙니다.
+
+### 버전 규칙
+
+- **SemVer**(`MAJOR.MINOR.PATCH`)를 사용합니다.
+- `0.x.y` 단계에서는 호환 가능한 버그 수정·문서·테스트 변경은 PATCH를
+  올리고, 기능 추가나 CLI/config/schema 동작 변경은 MINOR를 올립니다.
+- `1.0.0` 이후 호환되지 않는 CLI/config/schema 또는 persisted-data 변경은
+  MAJOR를 올립니다.
+- 모든 릴리스는 `VERSION`, `CHANGELOG.md`, README의 릴리스 요약을 함께
+  갱신하고, 검증 후 `vMAJOR.MINOR.PATCH` Git tag를 사용합니다.
+- 프로젝트 버전과 Codex CLI 버전은 별개입니다. 현재 Codex CLI pin은
+  `pipeline/codex-cli-policy.json`의 `0.147.0`입니다.
 
 ![Paper Curation 파이프라인](workflow.png)
 
@@ -25,9 +78,10 @@
 
 ## 목차
 
+- [릴리스 상태 및 버전 관리](#릴리스-상태-및-버전-관리)
 - [📖 독자로 둘러보기](#-독자로-둘러보기)
 - [🔧 운영자로 설치하기](#-운영자로-설치하기)
-- [💰 비용 가이드](#-비용-가이드)
+- [💳 크레딧 가이드](#-크레딧-가이드)
 - [기능](#기능)
 - [파이프라인](#파이프라인)
 - [사용 모드](#사용-모드)
@@ -44,11 +98,38 @@
 
 ## 🔧 운영자로 설치하기
 
-Zotero 컬렉션 + PDF + API 키(필수: Anthropic · Google · Zotero, OpenAI는 선택)만 있으면 됩니다.
+Zotero 컬렉션 + PDF만 있으면 됩니다. **유료 API 키(Anthropic/OpenAI/Google)가 필요 없습니다** — 생성은 저장된 ChatGPT Codex 로그인(saved-auth)으로 동작하고, 검색 인덱스는 로컬 BM25가 기본입니다.
 
-**가장 쉬운 방법 — Claude Code에서 한 줄** (전체 설치 플로우는 [CLAUDE.md](CLAUDE.md)의 "Installation Flow (Claude Code)" 참고):
+**가장 쉬운 방법 — Codex에서 한 줄** (전체 설치 플로우는 [AGENTS.md](AGENTS.md)의 "Installation Flow (Codex)" 참고):
 
 > "여기에 paper-curation을 설치해줘: https://github.com/jehyunlee/paper-curation"
+
+#### 🤖 LLM(Codex)이 위자드처럼 안내하는 설치 흐름
+
+사용자가 위 문장만 입력하면, LLM은 아래 **step-by-step**으로 필요한 정보를 하나씩
+요청하고, 답변이 오면 자동으로 진행합니다. 사용자는 질문에 답만 하면 됩니다.
+
+1. **사전 확인** — Codex 로그인(`codex login status` → `Logged in using ChatGPT`)과
+   Python 3.12 환경이 준비됐는지 확인합니다.
+2. **Zotero 준비 안내** — 아래를 차례로 설명하고 준비되면 진행합니다:
+   - [Zotero API 키 발급](https://www.zotero.org/settings/keys) (읽기 전용 권한이면 충분)
+   - Zotero 앱에서 리뷰할 논문들을 **컬렉션(폴더)** 하나에 넣기
+   - Zotero에서 해당 컬렉션의 **PDF가 로컬에 내려받아졌는지** 확인 (동기화 필요)
+3. **정보 요청** — 한 번에 하나씩만 묻습니다:
+   - "Zotero API 키를 알려주세요" (또는 `ZOTERO_API_KEY` 환경변수 확인)
+   - "이메일을 알려주세요 (Zotero/Unpaywall용)"
+   - "리뷰할 논문이 들어있는 **Zotero 컬렉션 이름**이 뭔가요?"
+   - "이 컬렉션을 앞으로 뭐라고 부를까요? (영문 짧은 이름, 예: `dementia2025`)"
+   - "Zotero PDF 저장 폴더 경로를 알려주세요" (예: `C:\Users\<이름>\Zotero`)
+4. **컬렉션 확인** — 입력한 컬렉션 이름이 Zotero에 없으면 **사용 가능한 컬렉션 목록**을
+   보여주고 다시 물어봅니다.
+5. **설치·실행** — `config.json` 생성 → 연결 테스트 → 첫 파이프라인 실행 → 결과 확인
+   (`serve_local.py`로 `http://localhost:8000/{토픽}/` 열람 안내).
+
+> 💡 **API 키가 없어도 되는 경우**: Zotero 앱이 이미 이 PC에 설치되어 있고
+> `C:\Users\<사용자이름>\Zotero\zotero.sqlite` 파일이 있다면, LLM은 그 로컬 DB에서
+> 컬렉션 목록·PDF 위치를 직접 읽을 수 있습니다. 이 경우 API 키 없이도 진행 가능합니다
+> (아래 "API 키 없이 시작하기" 참고).
 
 **수동 설치:**
 
@@ -57,47 +138,63 @@ Zotero 컬렉션 + PDF + API 키(필수: Anthropic · Google · Zotero, OpenAI�
 git clone https://github.com/jehyunlee/paper-curation.git && cd paper-curation
 conda create -n py312 -c conda-forge python=3.12 pip -y && conda activate py312
 pip install -r requirements.txt
+```
 
-# 2) API 키 (리뷰=Anthropic, 검색 임베딩·Figure 검증·TTS=Google)
-export ANTHROPIC_API_KEY=...
-export GOOGLE_API_KEY=...
+> ⚠️ **Windows 첫 실행 주의** — 모든 파이프라인 명령은 `PYTHONUTF8=1` 접두사가 필요합니다(cp949 인코딩 회피). Python은 **3.12 단독**만 지원하며, 다른 인터프리터(예: 3.14)로 실행하면 `_env_guard`가 자동으로 py312로 재실행합니다. 클러스터링(UMAP/HDBSCAN)은 numba 때문에 3.14에서 죽으므로 py312를 지정하세요.
 
-# 3) config.json 생성(대화형) → 첫 파이프라인 실행
+**필수 사전 조건 — Codex saved-auth 로그인:**
+
+- ChatGPT 계정에 Codex 로그인이 저장되어 있어야 합니다(`codex login status` → `Logged in using ChatGPT`).
+- 생성 역할은 **Terra**(긴 형식: 리뷰·타임라인 내러티브)와 **Luna**(짧은 형식: 요약·연결) 고정입니다. 유료 API 키로의 fallback은 **영구히 거부**됩니다(`allow_paid_api: false`).
+- 파이프라인은 Codex 구독 크레딧을 소비합니다. 크레딧이 소진되면 Codex 호출이 거부되고 해당 단계는 실패 처리되며, 크레딧이 재충전된 뒤 재개할 수 있습니다(자동 재시도 아님 — `--resume`/상태 파일로 이어서 실행).
+
+**설치 실행 → 첫 파이프라인:**
+
+```bash paper-curation-command
+# 3) config.json 생성(대화형) → 첫 파이프라인 실행 (--no-run으로 자동 실행 생략 가능)
 PYTHONUTF8=1 python pipeline/setup.py
 ```
 
-**설치 진단** — 문제가 있으면 `PYTHONUTF8=1 python pipeline/doctor.py` 로 py312 환경 · 필수 패키지 · API 키 · Zotero 연결을 한 번에 점검합니다.
+**설치 진단** — 문제가 있으면 아래 명령으로 py312 환경 · 필수 패키지 · Codex saved-auth · Zotero 연결을 한 번에 점검합니다:
+
+```bash paper-curation-command
+PYTHONUTF8=1 python pipeline/doctor.py --format json
+```
 
 사전 준비 체크리스트, config.json 스키마, 설치 확인, 문제 해결 → **[Setup Guide](docs/setup-guide.md)**
 
-## 💰 비용 가이드
+#### 🚫 API 키 없이 시작하기 (Zotero 초보·키 발급이 어려운 경우)
 
-> 정확한 실측이 아니라 **오더 오브 매그니튜드(order-of-magnitude) 가이드**입니다. 실제 비용은 논문 편수·본문 길이·타임라인 재생성 빈도·Insights opt-in 여부에 따라 크게 달라집니다.
+Zotero 앱이 이미 이 PC에 설치되어 있다면 **API 키 없이** 바로 시작할 수 있습니다.
+Zotero는 로컬에 `zotero.sqlite`(데이터 DB)와 `storage/`(PDF)를 보관합니다.
 
-단계별로 쓰이는 모델과 단가(입력/출력, 100만 토큰당):
+1. **Zotero 데이터 폴더 찾기**: 보통 `C:\Users\<사용자이름>\Zotero` 입니다.
+   (Zotero 앱 → 설정 → 고급 → 파일 및 폴더에서 확인 가능)
+2. **LLM에게 알려주기**: "Zotero 데이터 폴더는 `C:\Users\<이름>\Zotero` 입니다" 라고
+   하면, LLM이 로컬 DB(`zotero.sqlite`)와 `storage/`를 읽어 **컬렉션 목록과 PDF
+   동기화 상태를 직접 확인**합니다. (수동 확인: `python pipeline/tools/inspect_local_zotero.py --json`)
+3. 이후 동일하게 "어느 컬렉션을 큐레이션할까요?" 질문에 답하면 됩니다.
 
-| 단계 | 모델 | 단가 (입력 / 출력) |
+> ⚠️ **주의**: API 키가 없으면 Zotero 웹 라이브러리 접근은 못 하지만, 로컬에
+> 내려받은 PDF와 컬렉션 정보로는 충분히 파이프라인을 돌릴 수 있습니다. 다만
+> **컬렉션의 PDF가 로컬에 없으면** 리뷰를 만들 수 없으므로, Zotero 앱에서
+> 동기화를 눌러 PDF를 내려받아야 합니다.
+
+## 💳 크레딧 가이드
+
+> 유료 API 키 기반 과금이 **없습니다**. 생성은 ChatGPT 구독에 포함된 Codex 크레딧을 사용합니다.
+
+| 단계 | 모델/역할 | 비용 |
 |------|------|------|
-| 리뷰 · 연결 · 인사이트 | `claude-sonnet-5` | $2 / $10 (인트로, ~2026-08-31) → $3 / $15 |
-| Figure 검증 (vision judge) | `claude-haiku-4-5` | $1 / $5 |
-| 타임라인 내러티브 | `claude-opus-5` (5) | $5 / $25 |
-| 분류 | — (HDBSCAN + UMAP) | **LLM 호출 0회 → $0** |
-| 검색 임베딩 | Google `gemini-embedding-001` | Google 임베딩 요금(소액) |
+| 리뷰 · 연결 · 인사이트 | Codex **Terra** (long_form) | 구독 크레딧 |
+| 요약 · 분류 보조 | Codex **Luna** (short_form) | 구독 크레딧 |
+| 분류 | HDBSCAN + UMAP (로컬 결정론) | **LLM 호출 없음 → 크레딧 0** |
+| 검색 인덱스 | 로컬 BM25 (기본) | 무료 — 네트워크·임베딩 호출 없음 |
+| SPECTER2 임베딩 | 로컬 모델 (최초 1회 다운로드) | 무료 (한국망은 [AWS S3 미러](docs/operations.md#korean-network-workarounds) 사용) |
 
-**편당 리뷰 대략치** — 리뷰 1편은 논문 본문 발췌 + 프롬프트를 입력, 6섹션 한국어 리뷰를 출력합니다. 대략 입력 ~15k · 출력 ~4k 토큰으로 잡으면:
+**운영 부담**: 구독 크레딧만 소비되므로 **월 운영비 $0 (유료 API 키 없음)**. 크레딧 소진 시 다음 재충전까지 Codex 단계가 대기/실패하며, `--llm-mode off`로 결정론 단계만 실행할 수 있습니다.
 
-- 인트로 단가($2/$10): `15k × $2/1M + 4k × $10/1M ≈ $0.03 + $0.04 = ~$0.07`
-- 9/1 이후($3/$15): `15k × $3/1M + 4k × $15/1M ≈ $0.045 + $0.06 = ~$0.11`
-- 여기에 연결 생성(증분) + Figure 검증(Haiku)까지 얹으면 **편당 대략 $0.05–0.15** 수준입니다.
-
-**월간 운영 대략치** — 주간 ~20편(월 ~80편) 사이클 기준:
-
-- 리뷰: 80편 × ~$0.10 ≈ **$8**
-- 연결(증분, dirty 논문만) + 카테고리 요약(Haiku) ≈ **$1–3**
-- 타임라인(변경된 카테고리만, Opus, 비정기) ≈ **$1–3**
-- **합계 ≈ 월 $10–20** 수준 (Insights opt-in `--insights` 또는 전체 타임라인 재생성 시 증가)
-
-> **각주**: Sonnet 5 인트로 단가는 2026-08-31까지이며 **9/1 인트로 종료 후 재평가 예정**입니다. 분류 단계는 LLM을 전혀 호출하지 않으므로(HDBSCAN) 비용이 없습니다. Deep Research 답변 생성은 독자 BYOK라 운영자 비용에 포함되지 않습니다.
+> **각주**: Deep Research 답변 생성은 독자 BYOK라 운영자 비용에 포함되지 않습니다. 배포(`--mode deploy`)는 제거되어 더 이상 지원하지 않습니다.
 
 ## 기능
 
@@ -105,11 +202,11 @@ PYTHONUTF8=1 python pipeline/setup.py
 
 | 기능 | 설명 |
 |------|------|
-| **구조화 리뷰** | PDF에서 텍스트/Figure 추출 → Claude가 6개 섹션(Essence·Motivation·Achievement·How·Originality·Evaluation) 한국어 리뷰 자동 작성 |
-| **자동 분류** | Bottom-up 토픽 모델링(SPECTER2 + HDBSCAN + UMAP)으로 카테고리 자동 생성·배정 |
-| **같이 보면 좋은 논문** | 임베딩 후보를 Claude가 선별 — 관계 유형 + 한국어 이유 1문장. 망 장애에 강건(multi-round 재시도 + 연결 0개 논문 우선) |
-| **Deep Research** | 자연어 질의 → hybrid 검색(BM25+dense) → LLM 답변 + `[N]` 인용. Anthropic·OpenAI·Google 키 자동 감지 |
-| **Audio Overview** | 리뷰/답변을 팟캐스트형 한국어 오디오로(Gemini TTS, 브라우저 MP3 인코딩 → 다운로드 + 배포 시 이메일) |
+| **구조화 리뷰** | PDF에서 텍스트/Figure 추출 → Codex(Terra)가 6개 섹션(Essence·Motivation·Achievement·How·Originality·Evaluation) 한국어 리뷰 자동 작성 |
+| **자동 분류** | Bottom-up 토픽 모델링(SPECTER2 + HDBSCAN + UMAP)으로 카테고리 자동 생성·배정 — LLM 호출 없음 |
+| **같이 보면 좋은 논문** | 임베딩 후보를 Codex(Luna)가 선별 — 관계 유형 + 한국어 이유 1문장. 망 장애에 강건(multi-round 재시도 + 연결 0개 논문 우선) |
+| **Deep Research** | 자연어 질의 → BM25 검색(기본) → 로컬 서버(`serve_local.py`)에서 답변. 독자 BYOK(Anthropic·OpenAI·Google 키 자동 감지) |
+| **Audio Overview** | 리뷰/답변을 팟캐스트형 한국어 오디오로(Gemini TTS, 브라우저 MP3 인코딩 → 다운로드, 로컬) |
 | **타임라인** | 카테고리별 연구 동향 내러티브 + 다이어그램(PaperBanana) + main research timeline. `curate`에서도 누락 산출물은 기본 보강 |
 | **지식 축적** | Obsidian 연동 — 메모가 다음 질의에 반영되는 compounding knowledge |
 | **Citedby** | DOI 한 편에서 인용 계보·타임라인·내러티브·Deep(er) Research를 생성하고 PDF·Markdown·Obsidian·Audio로 출력 |
@@ -119,33 +216,36 @@ PYTHONUTF8=1 python pipeline/setup.py
 
 | 기능 | 켜는 법 | 설명 |
 |------|---------|------|
-| **콘텐츠 배포 (O-1)** | `--mode deploy` | Cloudflare Workers + gh-pages 스텁. 배포 시 Audio 이메일 발송 활성화 — [운영 매뉴얼](docs/operations.md#deploy-option-o-1) |
 | **Insights + 네트워크 (O-2)** | `--insights` | 크로스카테고리 인사이트 + UMAP 2D/3D 인터랙티브 네트워크 재생성 |
-| **로컬 LLM fallback** | `--local-fallback` | 망 전멸 시 로컬 모델(Ollama 등)로 연결 생성 완결 — [운영 매뉴얼](docs/operations.md#korean-network-workarounds) |
+| **검색 인덱스 dense 보강** | `build_search_index.py --with-dense` | Google `gemini-embedding-001` 임베딩 추가(BYOK). 기본은 BM25-only |
 | **워크플로 다이어그램** | `generate_workflow.py` | 상단 고양이 다이어그램 생성(PaperBanana, `--style cat/fairy/academic`) |
 
-**필요한 것**: Zotero 컬렉션 + PDF + API 키(필수: Anthropic · Google · Zotero). OpenAI는 선택.
+**필요한 것**: Zotero 컬렉션 + PDF + Codex saved-auth(ChatGPT 로그인). 유료 API 키는 **불필요**(`--llm-mode off`면 Codex조차 불필요 — 결정론 단계만 실행).
+
+> ⚠️ **비활성화된 기능**: `--mode deploy`(Cloudflare 배포), `--local-fallback`(로컬 LLM fallback), 크로스카테고리 Insights 기본 생성은 **제거/비활성**되었습니다. 기록에 남아 있는 명령은 실행되지 않습니다(exit 2 또는 지원 중단 안내).
 
 ## 파이프라인
 
 `run_full.py` 한 줄이 아래 Core 단계를 순서대로 실행합니다 (위 그림이 전체 흐름):
 
 1. **데이터 수집** — Zotero PDF → `text.md` + `figures/` (선택: arXiv·S2·OpenAlex 검색 후 Zotero 등록)
-2. **구조화 리뷰** — Claude가 6섹션 한국어 `review.md`
+2. **구조화 리뷰** — Codex(Terra)가 6섹션 한국어 `review.md`
 3. **토픽 모델링 + 분류** — SPECTER2 + HDBSCAN + UMAP로 카테고리 자동 생성·배정
-4. **같이 보면 좋은 논문** — 임베딩 후보를 Claude가 선별(multi-round 재시도)
-5. **카테고리 요약 + 타임라인 내러티브/main·category 다이어그램** & **Deep Research 검색 인덱스**(BM25 + Gemini 임베딩)
-6. **토픽 인덱스** `index.html`(Deep Research·Audio Overview 내장) → **로컬 열람**(`serve_local.py`) 또는 **배포**
+4. **같이 보면 좋은 논문** — 임베딩 후보를 Codex(Luna)가 선별(multi-round 재시도)
+5. **카테고리 요약 + 타임라인 내러티브/main·category 다이어그램** & **Deep Research 검색 인덱스**(BM25 기본)
+6. **토픽 인덱스** `index.html`(Deep Research·Audio Overview 내장) → **로컬 열람**(`serve_local.py`)
 
-**브라우저 안에서**: Deep Research(키 자동 감지)와 Audio Overview(Gemini TTS → MP3)가 동작합니다.
-**Option 분기**: `--insights`(크로스카테고리 인사이트 + 네트워크) · `--mode deploy`(Cloudflare + gh-pages) · `--local-fallback`(망 전멸 시 로컬 LLM).
+**브라우저 안에서**: Deep Research(키 자동 감지, BYOK)와 Audio Overview(Gemini TTS → MP3)가 동작합니다.
+**Option 분기**: `--insights`(크로스카테고리 인사이트 + 네트워크) · dense 보강은 별도 `build_search_index.py` 실행.
+
+**실패·재개**: 각 단계는 상태 파일로 추적됩니다. 실패 시 이전 단계 산출물 해시는 보존되고, `--resume`으로 실패한 단계부터만 재실행됩니다(전체 재생성 아님). 파이프라인은 **git 히스토리를 재작성하지 않습니다** — 산출물(리뷰·인덱스·HTML)은 재생성 가능하지만 저장소 히스토리는 불변입니다.
 
 ## Citedby — 한 논문에서 시작하는 인용 계보 분석
 
 DOI 또는 로컬 리뷰 논문을 기준으로 OpenAlex·Scopus·Semantic Scholar·arXiv에서
 인용논문을 수집하고, 시간에 따른 연구 흐름을 자기완결 HTML 보고서로 만듭니다.
 
-```bash
+```bash paper-curation-command
 PYTHONUTF8=1 python pipeline/run_citedby.py \
   --doi 10.xxxx/xxxxx \
   --pdf-first --build-index --serve --open
@@ -167,23 +267,22 @@ PYTHONUTF8=1 python pipeline/run_citedby.py \
 - **로컬 서버 열람** — `--serve --open`으로 `file://` 대신
   `http://localhost:8000/...`을 열어 embedding·streaming·Audio API를 바로 사용
 
-
 **CLI/에이전트 검색** — 인덱스를 재빌드하지 않는 읽기 전용 질의 경로:
-```bash
-# 통합 컬렉션(_cross), API 키 없이 BM25
+
+```bash paper-curation-command
+# 통합 컬렉션(_cross), 키 없이 BM25
 python pipeline/query_search_index.py --query "과학적 발견 자동화" --mode bm25
 
-# Gemini 질의 임베딩 + BM25 RRF, 구조화 JSON 출력
+# 구조화 JSON 출력
 python pipeline/query_search_index.py --topic humanoid --query "VLA action tokenization" --json
 ```
-기본 컬렉션은 `_cross`이며 `hybrid`·`dense`·`bm25`를 지원합니다. Python에서는
-`pipeline.api.query_search_index()`를 호출합니다. 질의는 인덱스를 변경하지 않으며,
-curate/rebuild가 인덱스를 갱신하고 deploy preflight가 fingerprint freshness를 확인합니다.
 
-**검색 품질 회귀 테스트** — 8개 컬렉션의 고정 40질의·고정 Gemini query vector로
+기본 컬렉션은 `_cross`이며 `bm25`가 기본 모드입니다(`hybrid`/`dense`는 dense 인덱스가 존재할 때만).
+Python에서는 `pipeline.api.query_search_index()`를 호출합니다. 질의는 인덱스를 변경하지 않습니다.
+
+**검색 품질 회귀 테스트** — 8개 컬렉션의 고정 40질의·고정 query vector로
 `recall@5/10`, `MRR@10`, 실패 질의를 네트워크 없이 측정합니다. 인덱스 재빌드 뒤에는
-해당 컬렉션과 `_cross`가 baseline보다 하락하면 배포를 중단하며, macmini에서는
-`scripts/install-retrieval-eval-launchd.sh`로 매주 일요일 03:17 평가를 설치합니다.
+해당 컬렉션과 `_cross`가 baseline보다 하락하면 검색 품질 경고를 냅니다.
 초기 `retrieval-v2-bootstrap`은 BM25 top-1 known-item 라벨이므로 절대 품질 점수가 아니라
 회귀 감지용입니다. 평가 자료·결정 기록은 `pipeline/eval/`에 있습니다.
 
@@ -193,25 +292,25 @@ curate/rebuild가 인덱스를 갱신하고 deploy preflight가 fingerprint fres
 
 단일 오케스트레이터 `run_full.py` (3축: `--mode` / `--source` / `--images`):
 
-```bash
+```bash paper-curation-command
 # 주간 운영 — 검색 → Zotero 등록 → sync → 신규 리뷰 + timeline 보강
 PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source web --days 7
 
 # 로컬 업데이트 — 검색 스킵, 신규/누락 narrative·timeline 기본 보강
 PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source zotero
 
-# timeline 보강까지 끄고 리뷰/분류만 돌리려면
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source zotero --images skip
-
-# 분류만 / 타임라인만 / 배포만
+# 분류만 / 타임라인만
 PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode reclassify
 PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode retime --images all
-PYTHONUTF8=1 python pipeline/run_full.py --topic humanoid --mode deploy
 
 # 실행 계획 미리보기 / 로컬 서버
 PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --dry-run
 PYTHONUTF8=1 python pipeline/serve_local.py     # localhost:8000 + /api/embed + /api/citedby-answer
 ```
+
+**LLM 모드(`--llm-mode`)**: `codex`(기본 — saved-auth 생성) | `off`(생성 단계 전부 건너뛰고 결정론 단계만, 정책 거부 exit 3). 유료 API 모드는 존재하지 않으며 `allow_paid_api: true` 설정은 영구 거부됩니다.
+
+**로컬 서버 필수**: Deep Research·Citedby의 embedding/streaming/Audio API는 로컬 서버(`serve_local.py`)가 필요합니다. `file://`로 직접 열면 "local server required" 안내가 표시됩니다.
 
 전체 모드 표, 안전 플래그, Concurrency 튜닝, 복구 절차 → **[Operations Manual](docs/operations.md)**
 
@@ -219,8 +318,8 @@ PYTHONUTF8=1 python pipeline/serve_local.py     # localhost:8000 + /api/embed + 
 
 | 문서 | 내용 |
 |------|------|
-| **[Setup Guide](docs/setup-guide.md)** | 사전 준비 · Claude Code/수동 설치 · config.json · 설치 확인 · 문제 해결 |
-| **[Operations Manual](docs/operations.md)** | 모드/안전 플래그 · Concurrency · 한국 망 우회(SPECTER2/arXiv/로컬 fallback) · 배포(O-1) · 복구 |
+| **[Setup Guide](docs/setup-guide.md)** | 사전 준비 · Codex/수동 설치 · config.json · 설치 확인 · 문제 해결 |
+| **[Operations Manual](docs/operations.md)** | 모드/안전 플래그 · Concurrency · 한국 망 우회(SPECTER2/arXiv) · 복구 |
 | **[Architecture & Internals](docs/architecture.md)** | 파이프라인 단계 상세 · 신뢰성 설계 · 내부 구조 · Karpathy LLM Wiki 비교 · 요구사항 |
 | **[English README](README.en.md)** | Full English documentation |
 
@@ -236,4 +335,4 @@ PYTHONUTF8=1 python pipeline/serve_local.py     # localhost:8000 + /api/embed + 
 
 ---
 
-*Built with Claude Code.* 🐱
+*Built with Codex.* 🐱

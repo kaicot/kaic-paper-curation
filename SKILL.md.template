@@ -1,12 +1,12 @@
 ---
 name: paper-curation
-description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검색 → Zotero 등록 → Paper Review → Deep Research 인덱스 빌드 → 정적 호스팅(GitHub Pages, Cloudflare Workers 등) 자동 배포까지 전체 실행. 트리거: '논문 큐레이션', '최신 논문 찾아줘', '논문 수집', 'paper curation', '오늘 나온 논문', '최신 논문 Zotero에', 'curate papers', '논문 모니터링', 'paper curation 배포해줘', '배포해줘'."
+description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검색 → Zotero 등록 → Paper Review → Deep Research 인덱스 빌드 → 로컬 인덱스/서버까지 단일 진입점. 트리거: '논문 큐레이션', '최신 논문 찾아줘', '논문 수집', 'paper curation', '오늘 나온 논문', '최신 논문 Zotero에', 'curate papers', '논문 모니터링'."
 ---
 
 # Paper Curation — 최신 논문 자동 큐레이션 및 Zotero 등록
 
 <Purpose>
-특정 시기(기본: 지난 24시간)와 분야(기본: science of science, bibliometrics, scientometrics)의 최신 논문을 arXiv, Semantic Scholar, OpenAlex에서 자동 검색하고, 중복 제거 및 관련성 필터링 후 Zotero에 일괄 등록한다. 등록된 논문에 대해 paper-review를 실행하고, 토픽 인덱스와 Deep Research 검색 인덱스(`_search_index.json`)를 빌드한 뒤 정적 호스팅(GitHub Pages, Cloudflare Workers 등)에 `master` push로 자동 배포한다. **Phase 1~7 전체를 항상 실행한다 (부분 실행 없음).**
+특정 시기(기본: 지난 24시간)와 분야(기본: science of science, bibliometrics, scientometrics)의 최신 논문을 arXiv, Semantic Scholar, OpenAlex에서 자동 검색하고, 중복 제거 및 관련성 필터링 후 Zotero에 일괄 등록한다. 등록된 논문에 대해 paper-review를 실행하고, 토픽 인덱스와 Deep Research 검색 인덱스(`_search_index.json`, BM25 기본)를 빌드한다. 생성은 Codex saved-auth(ChatGPT 로그인)만 사용하며 유료 API 키로의 fallback 은 없다. **Phase 1~7 전체를 항상 실행한다 (부분 실행 없음).**
 </Purpose>
 
 <Use_When>
@@ -14,7 +14,7 @@ description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검�
 - "논문 큐레이션", "논문 수집", "paper curation" 요청 시
 - "최신 논문 Zotero에 넣어줘" 요청 시
 - "논문 모니터링", "curate papers" 요청 시
-- "paper curation 배포해줘", "배포해줘" 요청 시 → `prepare_deploy.py --topic {topic} --push` 실행
+- "논문 큐레이션" / "paper curation" 요청 시 → `run_full.py --topic {topic} --mode curate` (로컬)
 - 특정 분야의 최신 동향을 추적할 때
 </Use_When>
 
@@ -49,7 +49,7 @@ description: "최신 학술 논문 자동 큐레이션 풀 파이프라인. 검�
   - `paper-scout` (1개): arXiv/S2/OpenAlex 병렬 검색 → 중복제거 → 관련성 필터
   - `zotero-librarian` (1개): Zotero 중복 체크 → 등록 → PDF 다운로드 → Figure 추출
   - `paper-reviewer` (4~5개 병렬): 논문 4-5편씩 배치로 리뷰 (run_in_background)
-  - `web-publisher` (1개): topic 뷰 index.html + Deep Research `_search_index.json` 빌드 + `git push origin master` (정적 호스팅 자동 배포)
+  - `web-publisher` (1개): topic 뷰 index.html + Deep Research `_search_index.json`(BM25) 빌드 + 로컬 서버 안내
 - 중간에 멈추지 않고 끝까지 실행. 실패한 단계는 스킵하고 보고서에 기록
 - PDF가 있는 논문만 리뷰 대상. 손상/부적절 PDF는 제외 목록에 기록
 
@@ -427,10 +427,10 @@ paper-curation/                          ← git repo ({github_repo})
 
    **출력:** `{topic}/_register_results.json`
 
-4. **Phase 6 - Paper Review 작성 및 정적 호스팅 배포**
+4. **Phase 6 - Paper Review 작성 및 로컬 인덱스 빌드**
 
-   등록된 각 논문에 대해 리뷰를 생성하고, 토픽 인덱스와 Deep Research 검색 인덱스를 빌드한 뒤 정적 호스팅(GitHub Pages, Cloudflare Workers 등)에 `master` push로 배포한다.
-   모든 단계는 실제 스크립트로 실행된다.
+   등록된 각 논문에 대해 리뷰를 생성하고, 토픽 인덱스와 Deep Research 검색 인덱스(BM25)를 빌드한다.
+   모든 단계는 실제 스크립트로 실행된다. 배포는 지원하지 않는다(로컬 서버 열람).
 
    #### 6-1. 리뷰 생성 (전체 파이프라인)
 
@@ -449,7 +449,7 @@ paper-curation/                          ← git repo ({github_repo})
    - 본문 추출 → `papers/{slug}/text.md` 캐싱 (PyMuPDF)
    - Figure 추출 (PyMuPDF 3x zoom, 최대 5개, pages 0-14)
    - Figure 검증 (Gemini Flash): 동일 크기 figure, 5KB 미만 → 무효 처리
-   - review.md 작성 (Claude Haiku, JSON→마크다운 템플릿)
+   - review.md 작성 (Codex, JSON→마크다운 템플릿)
    - index.html 변환 (review_to_html.py 내부 호출)
    - checkpoint 자동 저장 (`_update_force_checkpoint.json`) → 중단 후 재개 가능
    - Pass 1 완료 후 failed 논문 자동 재시도
@@ -493,7 +493,7 @@ paper-curation/                          ← git repo ({github_repo})
    # 전체 (narrative + 이미지)
    PYTHONUTF8=1 python pipeline/generate_timelines.py --topic ai4s
 
-   # narrative만 (Opus streaming)
+   # narrative만 (Codex)
    PYTHONUTF8=1 python pipeline/generate_timelines.py --topic ai4s --narrative-only
 
    # 이미지만 (기존 narrative 사용)
@@ -507,7 +507,7 @@ paper-curation/                          ← git repo ({github_repo})
    ```
 
    **프로세스 (Bottom-up 3-step):**
-   1. 카테고리별 narrative (Opus streaming) → `_category_narratives.json`
+   1. 카테고리별 narrative (Codex) → `_category_narratives.json`
    2. 카테고리 종합 → 메인 narrative + executive_summary_ko → `_timeline_narrative.json`
    3. PaperBanana로 이미지 생성 → `{topic}/*.png`
 
@@ -552,22 +552,16 @@ paper-curation/                          ← git repo ({github_repo})
 
    `review.md` → `index.html` 변환. MathJax, lightbox, 목록 돌아가기 링크 포함.
 
-   #### 6-8. 배포 준비 + Push
+   #### 6-8. 로컬 서버 열람
 
-   ```bash
-   # PNG→WebP 변환 + 참조 업데이트
-   PYTHONUTF8=1 python pipeline/prepare_deploy.py --topic ai4s
-
-   # 변환 + git push
-   PYTHONUTF8=1 python pipeline/prepare_deploy.py --topic ai4s --push
-
-   # 크기 예상만 (dry-run)
-   PYTHONUTF8=1 python pipeline/prepare_deploy.py --topic ai4s --dry-run
+   ```bash paper-curation-command
+   # Deep Research·Citedby API 를 위한 로컬 서버 (localhost:8000)
+   PYTHONUTF8=1 python pipeline/serve_local.py
    ```
 
-   PNG→WebP 변환 (quality 90) → HTML/MD 참조 업데이트 → 원본 PNG 삭제 → git push.
+   배포(`--mode deploy`)는 제거되었습니다. 기존 배포 토픽(humanoid/physical-ai)의 재배포만 `pipeline/prepare_deploy.py` 로 수동 수행합니다.
 
-   **배포 URL:** `{pages_base_url}/{topic}/`
+   **로컬 열람 URL:** `http://localhost:8000/{topic}/`
 
 5. **Phase 7 - 결과 보고**
 
@@ -577,14 +571,14 @@ paper-curation/                          ← git repo ({github_repo})
    **검색 기간**: {period_start} ~ {period_end}
    **분야**: {fields description}
    **검색 결과**: {total_found}편 → 중복 제거 {unique}편 → 관련성 필터 {filtered}편 → Zotero 신규 등록 {registered}편
-   **리뷰 작성**: {reviewed}편 | **배포**: {deploy_url}
+   **리뷰 작성**: {reviewed}편 | **로컬 열람**: http://localhost:8000/{field_slug}/
 
    | # | 제목 | 저자 | 소스 | PDF | Zotero | 리뷰 | 점수 |
    |---|------|------|------|-----|--------|------|------|
    | 1 | ... | ... | arXiv | ✅ | ABC123 | ✅ | 4/5 |
    | 2 | ... | ... | S2 | ❌ | DEF456 | ❌ | - |
 
-   **배포 URL**: {pages_base_url}/{field_slug}_{date_str}/
+   **로컬 열람 URL**: http://localhost:8000/{field_slug}/
    **이미 등록됨**: {already_count}편 (건너뜀)
    **실패**: {error_count}편
    ```
@@ -645,9 +639,9 @@ User: "이 논문 리뷰해줘"
 - [ ] 각 논문 paper-review 실행 (PDF 있는 논문만)
 - [ ] 인덱스 페이지 생성 (요약 + 핵심 그림 + 점수 + Deep Research UI)
 - [ ] Deep Research 검색 인덱스 빌드 (`{topic}/_search_index.json`)
-- [ ] 정적 호스팅 배포 ({pages_base_url}/{분야}_{YYMMDD}/) — `master` push 자동
-- [ ] 배포 URL 확인
-- [ ] 결과 보고 (등록 수, 리뷰 수, 인덱스 chunks 수, 배포 URL)
+- [ ] 로컬 서버 열람 (http://localhost:8000/{topic}/)
+- [ ] 로컬 열람 URL 확인
+- [ ] 결과 보고 (등록 수, 리뷰 수, 인덱스 chunks 수, 로컬 열람 URL)
 </Final_Checklist>
 
 <Advanced>
