@@ -92,6 +92,12 @@ setup.py 출력의 "다음 단계" 섹션을 사용자에게 전달한다. 특�
 
 - **요청 → 명령 매핑**: SKILL.md의 <Wizard_Daily_Use> 표를 따른다
   (curate zotero / curate web / reclassify / retime / 서버 열기 / 컬렉션 목록 / 진행 상황).
+- **논문 등록 (PDF/URL)**: 사용자가 PDF 경로나 논문 URL을 주면
+  `pipeline/tools/add_paper_to_zotero.py --pdf <경로>|--url <URL> --collection <이름>`
+  를 실행한다. 컬렉션이 없으면 Zotero에 자동 생성하고(쓰기 권한 필요),
+  등록 후 curation까지 이어서 실행한다. arXiv/DOI URL은 메타데이터를 자동
+  추출한다. PDF 첨부는 `linked_file`(로컬 링크)이라 클라우드 저장공간이
+  부족해도 동작한다.
 - **실행 후 안내 필수**: 결과 요약 + 열람 URL(`http://localhost:8000/{topic}/`)을
   사용자에게 알린다. 서버(`serve_local.py`)가 꺼져 있으면 자동으로 실행하고 URL을 안내한다.
 - **초보자 배려**: `localhost`가 뭔지 모르는 사용자에게는 "브라우저에서
