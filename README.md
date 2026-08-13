@@ -17,7 +17,7 @@
 
 Codex(또는 ChatGPT의 Codex)에게 아래 한 줄을 보내세요:
 
-> **"여기에 paper-curation 설치해줘: https://github.com/kaicot/kaic-paper-curation"**
+> **"여기에 kaic-paper-curation 설치해줘: https://github.com/kaicot/kaic-paper-curation"**
 
 그러면 LLM이 **한 번에 하나씩** 물어봅니다. 물어보는 대로 답하면 됩니다:
 
@@ -26,6 +26,10 @@ Codex(또는 ChatGPT의 Codex)에게 아래 한 줄을 보내세요:
 3. "리뷰할 Zotero 컬렉션 이름이 뭔가요?" → Zotero 앱에서 만든 폴더 이름
 4. "이 컬렉션을 뭐라고 부를까요?" → 아무 영문 이름 (예: `mypapers`)
 5. 설치 완료 → "브라우저에서 이 주소를 여세요"라고 알려줌
+
+> 💡 **스킬로 부르기**: 설치가 끝나면 Codex 입력창에 `@`를 누르고
+> `kaic-paper-curation` 을 선택하면 됩니다. 이후 PDF 드래그 앤 드롭이나
+> 논문 주소 붙여넣기만으로 "이 논문 넣어줘"라고 하면 스킬이 처리합니다.
 
 ### 0단계 — Zotero에 논문 넣기 (아직 없을 때)
 
