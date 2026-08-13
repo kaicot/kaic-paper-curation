@@ -1,0 +1,19 @@
+{
+  "schema": "one-paper-fixture-v1",
+  "schema_version": 1,
+  "paper_slug": "001_Alpha",
+  "seed_files": [
+    "papers/001_Alpha/text.md",
+    "papers/001_Alpha/metadata.json"
+  ],
+  "required_artifacts": [
+    "papers/001_Alpha/review.md",
+    "papers/001_Alpha/index.html",
+    "papers/001_Alpha/figures/manifest-v1.json",
+    "provider-events.jsonl"
+  ],
+  "seed_sha256": {
+    "papers/001_Alpha/text.md": "8128e9513e578cd9b87fe2e1e86ce9c4cd72b775c7c6a01e667140d9b035cbd1",
+    "papers/001_Alpha/metadata.json": "deb7dd264e3cd01e02329b6457b1ceb581fbeb4afdea8632cc2a84bf452cec2c"
+  }
+}

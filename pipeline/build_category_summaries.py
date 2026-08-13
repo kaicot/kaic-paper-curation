@@ -1,332 +1,494 @@
-"""
-_category_summaries.json 생성.
+"""Generate transactional Korean category and sub-theme summary artifacts."""
 
-카테고리별 description_ko, sub_themes (with description_ko), papers 목록을 생성한다.
-classify_papers.py 실행 후에 실행해야 한다 (primary_category 필요).
-
-Usage:
-  PYTHONUTF8=1 python build_category_summaries.py --topic ai4s
-  PYTHONUTF8=1 python build_category_summaries.py --topic ai4s --regen-ko  # 한글 설명만 재생성
-"""
+from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
-from collections import defaultdict
-from anthropic import Anthropic
+import sys
+import tempfile
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, cast, final
 
-from config_loader import PAPERS_DIR as _PAPERS_DIR, get_topic_dir
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.config_loader import (  # noqa: E402
+    PAPERS_DIR as _PAPERS_DIR,
+    get_topic_dir,
+    load_config,
+)
+from pipeline.lib.atomic_io import atomic_write_json  # noqa: E402
+from pipeline.lib.generation_cache import (  # noqa: E402
+    CacheFailure,
+    CacheIdentity,
+    CacheSuccess,
+    GenerationCache,
+    GenerationCacheError,
+)
+from pipeline.providers.codex_gateway import CodexGateway, CodexGatewayError  # noqa: E402
+from pipeline.runtime_policy import (  # noqa: E402
+    RuntimePolicy,
+    RuntimePolicyError,
+    resolve_runtime_policy,
+)
+from pipeline.schemas.codex_schema import (  # noqa: E402
+    JsonObject,
+    SchemaError,
+    validate_json,
+)
+
 PAPERS_DIR = str(_PAPERS_DIR)
-
-def _anthropic_text(resp):
-    parts = []
-    for block in getattr(resp, "content", []) or []:
-        if getattr(block, "type", None) == "text" and getattr(block, "text", None):
-            parts.append(block.text)
-    text = "".join(parts).strip()
-    if not text:
-        types = [getattr(b, "type", type(b).__name__) for b in getattr(resp, "content", []) or []]
-        raise RuntimeError(f"Anthropic response contained no text blocks: {types}")
-    return text
+SUMMARY_SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "category-summary-v1.json"
+with SUMMARY_SCHEMA_PATH.open("r", encoding="utf-8") as _schema_handle:
+    SUMMARY_SCHEMA = cast(JsonObject, json.load(_schema_handle))
 
 
-# Categories are now dynamic from _papers_index.json (BERTopic-generated)
+class SummaryGenerationError(RuntimeError):
+    """A bounded category-summary generation exhausted its valid attempts."""
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _sha256(value: object) -> str:
+    return hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def validate_description(text: str, label: str) -> str | None:
+    if len(text) < 50:
+        return f"{label}: too short ({len(text)} chars)"
+    korean = len(re.findall(r"[가-힣]", text))
+    if korean < len(text) * 0.3:
+        return f"{label}: Korean ratio too low"
+    if "[NNN]" in text:
+        return f"{label}: literal [NNN] remained"
+    if text[-1] not in ".!?。다요음임함됨됨.":
+        return f"{label}: missing terminal punctuation"
+    return None
+
+
+@final
+class SummaryCodex:
+    """Bounded short-form generation with success-only cache publication."""
+
+    def __init__(self, runtime_policy, gateway, cache, identity_factory=CacheIdentity.from_gateway):
+        self.runtime_policy = runtime_policy
+        self.gateway = gateway
+        self.cache = cache
+        self.identity_factory = identity_factory
+
+    @classmethod
+    def production(cls, topic_dir: str | Path, runtime_policy: RuntimePolicy) -> "SummaryCodex":
+        if runtime_policy.mode != "codex":
+            raise GenerationCacheError(
+                "policy-denied",
+                "category summary generation requires codex mode",
+            )
+        return cls(
+            runtime_policy,
+            CodexGateway.production(ROOT),
+            GenerationCache(Path(topic_dir) / ".llm_cache"),
+        )
+
+    def generate_korean(
+        self,
+        *,
+        prompt: str,
+        source: JsonObject,
+        task_id: str,
+        label: str,
+        max_attempts: int = 2,
+    ) -> str:
+        issue_hint = ""
+        for attempt in range(1, max_attempts + 1):
+            attempt_prompt = prompt + issue_hint
+            last_issue = "schema-invalid"
+            identity = self.identity_factory(
+                runtime_policy=self.runtime_policy,
+                gateway=self.gateway,
+                role="short_form",
+                prompt_version="category-summary-prompt-v1",
+                prompt=attempt_prompt,
+                schema_version="category-summary-v1",
+                schema=SUMMARY_SCHEMA,
+                source=_canonical(source),
+                task_id=task_id,
+            )
+
+            def produce():
+                nonlocal last_issue
+                try:
+                    value = self.gateway.generate_json(
+                        "short_form",
+                        attempt_prompt,
+                        SUMMARY_SCHEMA,
+                    )
+                    validate_json(value, SUMMARY_SCHEMA)
+                    if set(value) != {"description_ko"}:
+                        raise SummaryGenerationError("summary fields must be exact")
+                    text = value.get("description_ko")
+                    if not isinstance(text, str):
+                        raise SummaryGenerationError("description_ko must be text")
+                    issue = validate_description(text.strip(), label)
+                    if issue:
+                        last_issue = issue
+                        raise SummaryGenerationError(issue)
+                    return CacheSuccess({"description_ko": text.strip()})
+                except (
+                    CodexGatewayError,
+                    SchemaError,
+                    SummaryGenerationError,
+                    TypeError,
+                    ValueError,
+                ):
+                    return CacheFailure("failed")
+
+            try:
+                result = self.cache.get_or_generate(identity, produce)
+            except GenerationCacheError:
+                if attempt == max_attempts:
+                    raise SummaryGenerationError(last_issue)
+                issue_hint = (
+                    "\n\nPrevious output failed this deterministic quality check: "
+                    f"{last_issue}. Return a corrected Korean description."
+                )
+                continue
+            text = result.get("description_ko")
+            if not isinstance(text, str):
+                raise SummaryGenerationError("cached description is invalid")
+            issue = validate_description(text, label)
+            if issue:
+                raise SummaryGenerationError(issue)
+            return text
+        raise SummaryGenerationError("bounded attempts exhausted")
 
 
 def collect_sub_themes_from_index(cat_name, papers, topic):
-    """classifications[topic].sub_categories[cat_name] 값을 정본으로 수집. LLM 생성 안 함."""
-    from collections import Counter
+    """Collect deterministic sub-theme names from classification artifacts."""
     sub_counts = Counter()
-    for p in papers:
-        cls = p.get("classifications", {}).get(topic, {})
-        # New schema: sub_categories dict per category
-        sc = cls.get("sub_categories", {}).get(cat_name, "")
-        # Fallback: legacy sub_category (for primary only)
-        if not sc and cls.get("primary_category") == cat_name:
-            sc = cls.get("sub_category", "")
-        if sc:
-            sub_counts[sc] += 1
-
-    if not sub_counts:
-        return []
-
+    for paper in papers:
+        classification = paper.get("classifications", {}).get(topic, {})
+        sub_category = classification.get("sub_categories", {}).get(cat_name, "")
+        if not sub_category and classification.get("primary_category") == cat_name:
+            sub_category = classification.get("sub_category", "")
+        if sub_category:
+            sub_counts[sub_category] += 1
     return [
-        {"name": name, "description": f"{name} ({count} papers in {cat_name})", "count": count}
+        {
+            "name": name,
+            "description": f"{name} ({count} papers in {cat_name})",
+            "count": count,
+        }
         for name, count in sub_counts.most_common()
     ]
 
 
-def _call_with_invariant_gate(prompt, model, max_tokens, label, client,
-                                max_retries=1):
-    """Call Haiku and enforce ``validate_description`` invariants.
-
-    On a violation we retry once with a hint that explicitly names the
-    issue. If the retry still fails we return the best attempt and let
-    the caller decide whether to log/escalate. Returns (text, issue) —
-    ``issue`` is ``None`` on success.
-    """
-    last_text = ""
-    last_issue = None
-    for attempt in range(max_retries + 1):
-        local_prompt = prompt
-        if attempt > 0 and last_issue:
-            local_prompt = (
-                f"{prompt}\n\n[직전 출력의 문제]: {last_issue}\n"
-                "위 문제를 고치되 같은 규칙을 모두 지켜 다시 작성하세요."
-            )
-        try:
-            resp = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": local_prompt}],
-            )
-            text = _anthropic_text(resp)
-            if text and text[-1] not in ".다":
-                text += "."
-        except Exception as e:
-            return "", f"{label}: 호출 실패 ({type(e).__name__})"
-
-        issue = validate_description(text, label)
-        if issue is None:
-            return text, None
-        last_text = text
-        last_issue = issue
-    return last_text, last_issue
+def _paper_source(paper, topic):
+    return {
+        "classifications": paper.get("classifications", {}).get(topic, {}),
+        "date": paper.get("date", ""),
+        "essence": paper.get("essence", ""),
+        "score": paper.get("score", 0),
+        "slug": paper.get("slug", ""),
+        "title": paper.get("title", ""),
+    }
 
 
-def generate_description_ko(cat_name, papers, sub_themes, client, topic="ai4s"):
-    """카테고리 overview 한글 설명 생성 ([NNN] 마커).
+def _category_source(category, papers, sub_themes, topic):
+    return {
+        "category": category,
+        "papers": [
+            _paper_source(paper, topic)
+            for paper in sorted(papers, key=lambda item: item.get("slug", ""))
+        ],
+        "sub_themes": sub_themes,
+        "topic": topic,
+    }
 
-    invariant gate (length, korean ratio, [NNN] residue, terminal punct)
-    위반 시 1회 자동 재호출.
-    """
-    top = sorted(papers, key=lambda x: -x.get("score", 0))[:20]
-    refs = "\n".join(f"[{p['slug'].split('_')[0]}] {p['title'][:60]}" for p in top)
-    sub_names = ", ".join(st["name"] for st in sub_themes)
 
-    prompt = f"""{topic} 카테고리 "{cat_name}" ({len(papers)}편) 개요를 한국어로 작성하세요.
+def _entry_is_current(entry, source_sha256):
+    if entry.get("source_sha256") != source_sha256:
+        return False
+    category = str(entry.get("category", ""))
+    description = entry.get("description_ko", "")
+    if not isinstance(description, str) or validate_description(description, category):
+        return False
+    for sub_theme in entry.get("sub_themes", []):
+        if not isinstance(sub_theme, dict):
+            return False
+        label = f"{category}/{sub_theme.get('name', '')}"
+        text = sub_theme.get("description_ko", "")
+        if not isinstance(text, str) or validate_description(text, label):
+            return False
+    return True
 
-Sub-themes: {sub_names}
-논문 목록:
-{refs}
 
-규칙:
-- 한국어 4~6문장, 기술용어 영문 병기
-- 논문 인용은 [N] 형식만 (위 목록의 대괄호 번호를 그대로 사용)
-- 논문 제목을 본문에 직접 쓰지 마세요
-- 반드시 마침표(.)로 끝나는 완결된 문장
-- 텍스트만 출력"""
-
-    text, issue = _call_with_invariant_gate(
-        prompt, "claude-haiku-4-5-20251001", 1500, cat_name, client,
+def _overview_prompt(topic, category, papers, sub_themes):
+    top = sorted(papers, key=lambda item: -item.get("score", 0))[:20]
+    paper_block = "\n".join(
+        f"[{str(paper.get('slug', '')).split('_')[0]}] {str(paper.get('title', ''))[:60]}"
+        for paper in top
     )
-    if issue is not None and text:
-        print(f"  WARN overview {cat_name}: {issue} (best-effort 반환)")
-    elif not text:
-        print(f"  ERR overview {cat_name}: {issue}")
-    return text
+    themes = ", ".join(str(theme.get("name", "")) for theme in sub_themes)
+    return f"""{topic} category "{category}" ({len(papers)} papers) overview.
+Representative papers:
+{paper_block}
+Sub-themes: {themes or 'none'}
+
+Return a Korean 4-6 sentence description matching the supplied schema.
+Keep technical terms in English, cite papers with the listed numeric [N] markers,
+do not repeat paper titles, and end with a complete sentence."""
 
 
-def generate_sub_theme_ko(cat_name, st_name, st_desc, papers, client):
-    """Sub-theme 한글 설명 생성 ([NNN] 마커). invariant gate 적용."""
-    refs = "\n".join(f"[{p['slug'].split('_')[0]}] {p['title'][:60]}"
-                     for p in sorted(papers, key=lambda x: -x.get('score', 0))[:8])
-    if not refs:
-        return st_desc
-
-    prompt = f"""다음 sub-category에 대해 한국어 설명을 작성하세요.
-
-Category: {cat_name}
-Sub-category: {st_name} ({len(papers)}편)
-
-논문 목록:
-{refs}
-
-규칙:
-- 한국어 4~6문장, 기술용어 영문 병기
-- 논문 인용은 [NNN] 형식만 (최소 2개 인용)
-- 반드시 마침표(.)로 끝나는 완결된 문장
-- 텍스트만 출력"""
-
-    label = f"{cat_name}/{st_name}"
-    text, issue = _call_with_invariant_gate(
-        prompt, "claude-haiku-4-5-20251001", 1000, label, client,
+def _subtheme_prompt(category, sub_theme, papers):
+    top = sorted(papers, key=lambda item: -item.get("score", 0))[:8]
+    paper_block = "\n".join(
+        f"[{str(paper.get('slug', '')).split('_')[0]}] {str(paper.get('title', ''))[:60]}"
+        for paper in top
     )
-    if issue is not None and text:
-        print(f"  WARN sub-ko {label}: {issue} (best-effort 반환)")
-    elif not text:
-        print(f"  ERR sub-ko {label}: {issue}")
-        return st_desc
-    return text
+    return f"""Category "{category}" sub-theme "{sub_theme['name']}" overview.
+{paper_block}
+
+Return a Korean 4-6 sentence description matching the supplied schema.
+Keep technical terms in English, include at least two listed numeric citations,
+and end with a complete sentence."""
 
 
-def validate_description(text, label):
-    """설명 품질 검증. 문제가 있으면 이유 반환, 없으면 None."""
-    if not text or len(text) < 50:
-        return f"{label}: 너무 짧음 ({len(text or '')}자)"
-    korean = len(re.findall(r'[\uac00-\ud7af]', text))
-    if korean < len(text) * 0.3:
-        return f"{label}: 한국어 비율 낮음"
-    if "[NNN]" in text:
-        return f"{label}: [NNN] 리터럴 잔류"
-    if text.strip()[-1] not in ".다":
-        return f"{label}: 마침표로 끝나지 않음"
-    return None
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            _ = handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def _run_category_summary(topic="ai4s", *, regen_ko=False, categories=None):
-    """Programmatic entrypoint for build_category_summaries.
+def _run_category_summary(
+    topic="ai4s",
+    *,
+    regen_ko=False,
+    categories=None,
+    runtime_policy=None,
+    generator=None,
+):
+    """Build a complete candidate artifact and publish only after all gates pass."""
+    policy = runtime_policy or resolve_runtime_policy(
+        cast(JsonObject, cast(object, load_config()))
+    )
+    if policy.mode != "codex" and generator is None:
+        return {"status": "unavailable", "reason": "runtime-off"}
+    topic_dir = Path(get_topic_dir(topic))
+    summary_path = topic_dir / "_category_summaries.json"
+    previous_path = topic_dir / "_category_summaries.previous.json"
+    failure_path = topic_dir / "_category_summaries.failed.json"
 
-    `categories` is a list of category names to selectively regenerate.
-    """
-    topic_dir = str(get_topic_dir(topic))
-    sum_path = os.path.join(topic_dir, "_category_summaries.json")
-
-    with open(os.path.join(PAPERS_DIR, "_papers_index.json"), "r", encoding="utf-8") as f:
-        papers = json.load(f)
-
-    topic_papers = [p for p in papers if topic in p.get("topics", [])]
-    print(f"Topic '{topic}': {len(topic_papers)} papers (of {len(papers)} total)")
-
-    cat_papers = defaultdict(list)
-    for p in topic_papers:
-        cls = p.get("classifications", {}).get(topic, {})
-        cat_papers[cls.get("primary_category", "Other")].append(p)
-
+    papers_path = Path(PAPERS_DIR) / "_papers_index.json"
+    papers = json.loads(papers_path.read_text(encoding="utf-8"))
+    topic_papers = [paper for paper in papers if topic in paper.get("topics", [])]
+    category_papers = defaultdict(list)
     sub_papers = defaultdict(list)
-    for p in topic_papers:
-        cls = p.get("classifications", {}).get(topic, {})
-        pc = cls.get("primary_category", "")
-        sc = cls.get("sub_categories", {}).get(pc, cls.get("sub_category", ""))
-        key = (pc, sc)
-        sub_papers[key].append(p)
+    for paper in topic_papers:
+        classification = paper.get("classifications", {}).get(topic, {})
+        category = classification.get("primary_category", "Other")
+        category_papers[category].append(paper)
+        sub_category = classification.get("sub_categories", {}).get(
+            category,
+            classification.get("sub_category", ""),
+        )
+        sub_papers[(category, sub_category)].append(paper)
 
-    client = Anthropic(timeout=180.0, max_retries=4)
+    existing_bytes = summary_path.read_bytes() if summary_path.exists() else None
+    existing = json.loads(existing_bytes) if existing_bytes else []
+    existing_by_category = {
+        entry.get("category"): entry
+        for entry in existing
+        if isinstance(entry, dict) and isinstance(entry.get("category"), str)
+    }
+    selected = set(categories) if categories else None
+    if generator is None:
+        generator = SummaryCodex.production(topic_dir, policy)
 
-    if regen_ko and os.path.exists(sum_path):
-        with open(sum_path, "r", encoding="utf-8") as f:
-            summaries = json.load(f)
-    else:
-        summaries = []
-
-    if not regen_ko:
-        if categories and os.path.exists(sum_path):
-            with open(sum_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            current_cats = set(cat_papers.keys())
-            preserved = [s for s in existing
-                         if s["category"] not in categories
-                         and s["category"] in current_cats]
-            dropped = [s["category"] for s in existing
-                       if s["category"] not in categories
-                       and s["category"] not in current_cats]
-            summaries = preserved
-            CATEGORIES = [c for c in categories if c in cat_papers]
-            print(f"  Selective update: {len(CATEGORIES)} categories to regenerate, {len(preserved)} preserved")
-            if dropped:
-                print(f"  Dropped {len(dropped)} stale categories: {dropped}")
-        else:
-            summaries = []
-            CATEGORIES = sorted(c for c in cat_papers.keys() if c != "Other") + (["Other"] if "Other" in cat_papers else [])
-        for cat_name in CATEGORIES:
-            plist = cat_papers.get(cat_name, [])
-            if not plist:
+    candidates = []
+    generated = 0
+    reused = 0
+    try:
+        category_names = sorted(
+            (name for name in category_papers if name != "Other"),
+        ) + (["Other"] if "Other" in category_papers else [])
+        for category in category_names:
+            category_list = category_papers[category]
+            sub_themes = (
+                collect_sub_themes_from_index(category, category_list, topic)
+                if len(category_list) > 30
+                else []
+            )
+            source = cast(
+                JsonObject,
+                cast(
+                    object,
+                    _category_source(category, category_list, sub_themes, topic),
+                ),
+            )
+            source_sha256 = _sha256(source)
+            existing_entry = existing_by_category.get(category)
+            force = bool(
+                (selected is not None and category in selected)
+                or (regen_ko and selected is None)
+            )
+            if (
+                not force
+                and isinstance(existing_entry, dict)
+                and _entry_is_current(existing_entry, source_sha256)
+            ):
+                candidates.append(existing_entry)
+                reused += 1
                 continue
 
-            print(f"\n{cat_name} ({len(plist)} papers)...")
-
-            if len(plist) > 30:
-                sub_themes = collect_sub_themes_from_index(cat_name, plist, topic)
-                print(f"  {len(sub_themes)} sub-themes (from index)")
-            else:
-                sub_themes = []
-
-            top = sorted(plist, key=lambda x: -x.get("score", 0))[:20]
-
-            summaries.append({
-                "category": cat_name,
-                "description": f"AI for Science category: {cat_name}",
-                "count": len(plist),
-                "avg_score": round(sum(p.get("score", 0) for p in plist) / max(1, len(plist)), 2),
+            top = sorted(category_list, key=lambda item: -item.get("score", 0))[:20]
+            entry = cast(JsonObject, cast(object, {
+                "avg_score": round(
+                    sum(paper.get("score", 0) for paper in category_list)
+                    / max(1, len(category_list)),
+                    2,
+                ),
+                "category": category,
+                "count": len(category_list),
+                "description": f"AI for Science category: {category}",
+                "papers": [
+                    {
+                        "date": paper.get("date", ""),
+                        "dir": paper["slug"],
+                        "score": paper.get("score", 0),
+                        "slug": paper["slug"],
+                        "title": paper["title"],
+                    }
+                    for paper in top
+                ],
+                "source_sha256": source_sha256,
                 "sub_themes": sub_themes,
-                "papers": [{"slug": p["slug"], "dir": p["slug"], "title": p["title"],
-                            "score": p.get("score", 0), "date": p.get("date", "")} for p in top],
-            })
+            }))
+            task_hash = hashlib.sha256(category.encode("utf-8")).hexdigest()[:16]
+            entry["description_ko"] = generator.generate_korean(
+                prompt=_overview_prompt(topic, category, category_list, sub_themes),
+                source=source,
+                task_id=f"category-summary:{topic}:{task_hash}",
+                label=category,
+            )
+            sub_theme_rows = cast(
+                list[JsonObject],
+                cast(object, entry["sub_themes"]),
+            )
+            for sub_theme in sub_theme_rows:
+                name = sub_theme["name"]
+                sub_source = cast(JsonObject, cast(object, {
+                    "category_source_sha256": source_sha256,
+                    "papers": [
+                        _paper_source(paper, topic)
+                        for paper in sub_papers.get((category, name), [])
+                    ],
+                    "sub_theme": sub_theme,
+                }))
+                sub_hash = hashlib.sha256(
+                    f"{category}\0{name}".encode("utf-8")
+                ).hexdigest()[:16]
+                sub_theme["description_ko"] = generator.generate_korean(
+                    prompt=_subtheme_prompt(
+                        category,
+                        sub_theme,
+                        sub_papers.get((category, name), []),
+                    ),
+                    source=sub_source,
+                    task_id=f"subtheme-summary:{topic}:{sub_hash}",
+                    label=f"{category}/{name}",
+                )
+            candidates.append(entry)
+            generated += 1
+    except (GenerationCacheError, SummaryGenerationError) as error:
+        topic_dir.mkdir(parents=True, exist_ok=True)
+        if existing_bytes is not None:
+            _atomic_write_bytes(previous_path, existing_bytes)
+        atomic_write_json(
+            failure_path,
+            {
+                "error": type(error).__name__,
+                "result": "failed",
+                "schema_version": 1,
+                "topic": topic,
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": "summary-generation-failed",
+            "generated": generated,
+            "reused": reused,
+        }
 
-    print("\nGenerating Korean descriptions (parallel per-category)...")
-    issues = []
-    issues_lock = __import__("threading").Lock()
-    regen_set = set(categories) if categories else None
-
-    def _process_one(s):
-        """Generate KO description + sub-theme descriptions for a single
-        category. Mutates ``s`` in place; safe because each thread owns
-        its own ``s`` dict reference."""
-        cat = s["category"]
-        if regen_set and cat not in regen_set:
-            return
-        plist = cat_papers.get(cat, [])
-
-        existing_ko = s.get("description_ko", "")
-        if not existing_ko or regen_ko or validate_description(existing_ko, cat):
-            ko = generate_description_ko(cat, plist, s.get("sub_themes", []), client, topic=topic)
-            s["description_ko"] = ko
-            issue = validate_description(ko, cat)
-            if issue:
-                with issues_lock:
-                    issues.append(issue)
-            print(f"  {cat}: overview {len(ko)}chars")
-
-        for st in s.get("sub_themes", []):
-            existing_stko = st.get("description_ko", "")
-            label = f"{cat}/{st['name']}"
-            if not existing_stko or regen_ko or validate_description(existing_stko, label):
-                sp = sub_papers.get((cat, st["name"]), [])
-                ko = generate_sub_theme_ko(cat, st["name"], st.get("description", ""), sp, client)
-                st["description_ko"] = ko
-                issue = validate_description(ko, label)
-                if issue:
-                    with issues_lock:
-                        issues.append(issue)
-            print(f"    {st['name']}: {len(st.get('description_ko',''))}chars")
-
-    # ThreadPool: Haiku calls are I/O-bound. Anthropic Tier 4 (~5k RPM,
-    # 400k ITPM) easily handles 8 concurrent category workers.
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    max_workers = int(os.environ.get("CAT_SUMMARY_PARALLEL", "8"))
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_process_one, s) for s in summaries]
-        for fut in as_completed(futures):
-            # Surface exceptions; per-category failure shouldn't kill the rest.
-            try:
-                fut.result()
-            except Exception as e:
-                print(f"  [category failed] {str(e)[:120]}")
-
-    os.makedirs(topic_dir, exist_ok=True)
-    from lib.atomic_io import atomic_write_json
-    atomic_write_json(sum_path, summaries)
-
-    print(f"\nSaved: {sum_path} ({len(summaries)} categories)")
-    if issues:
-        print(f"\nWARNING: {len(issues)} quality issues:")
-        for issue in issues:
-            print(f"  - {issue}")
-    else:
-        print("OK: All descriptions pass quality check")
-    return summaries
+    topic_dir.mkdir(parents=True, exist_ok=True)
+    if existing_bytes is not None:
+        _atomic_write_bytes(previous_path, existing_bytes)
+    atomic_write_json(summary_path, candidates)
+    failure_path.unlink(missing_ok=True)
+    return {
+        "status": "ok",
+        "generated": generated,
+        "reused": reused,
+        "summaries": candidates,
+    }
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Build _category_summaries.json")
-    parser.add_argument("--topic", default="ai4s")
-    parser.add_argument("--regen-ko", action="store_true", help="한글 설명만 재생성")
-    parser.add_argument("--categories", nargs="+", help="Specific categories to regenerate (others preserved)")
+    _ = parser.add_argument("--topic", default="ai4s")
+    _ = parser.add_argument("--regen-ko", action="store_true")
+    _ = parser.add_argument("--categories", nargs="+", default=None)
+    _ = parser.add_argument("--llm-mode", default=None)
     args = parser.parse_args()
-    _run_category_summary(topic=args.topic, regen_ko=args.regen_ko,
-                          categories=args.categories)
+    categories = (
+        [value.strip() for value in args.categories if value.strip()]
+        if args.categories
+        else None
+    )
+    try:
+        policy = resolve_runtime_policy(
+            cast(JsonObject, cast(object, load_config())),
+            args.llm_mode,
+        )
+        result = _run_category_summary(
+            topic=args.topic,
+            regen_ko=args.regen_ko,
+            categories=categories,
+            runtime_policy=policy,
+        )
+    except RuntimePolicyError as error:
+        print(f"Runtime policy denied: {error.code}", file=sys.stderr)
+        return 2
+    if result.get("status") != "ok":
+        print(f"Category summary stage failed: {result.get('reason', 'unknown')}")
+        return 2
+    print(
+        f"Saved category summaries: generated={result['generated']} reused={result['reused']}"
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

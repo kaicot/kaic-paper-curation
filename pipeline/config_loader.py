@@ -12,12 +12,16 @@ import json
 import os
 import ssl
 import urllib.request
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import cast
 
-# Corporate proxy intercepts HTTPS with self-signed cert; skip verification
+if __package__:
+    from .runtime_policy import JsonObject, resolve_runtime_policy
+else:
+    from runtime_policy import JsonObject, resolve_runtime_policy
+
 _ssl_ctx = ssl.create_default_context()
-_ssl_ctx.check_hostname = False
-_ssl_ctx.verify_mode = ssl.CERT_NONE
 
 PIPELINE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PIPELINE_DIR.parent
@@ -36,6 +40,113 @@ REPO = PROJECT_ROOT  # backward compat alias
 _config_cache = None
 _user_id_cache = None
 _collection_key_cache = None
+
+
+def _windows_known_profile() -> Path:
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    result = cast(
+        int,
+        ctypes.windll.shell32.SHGetFolderPathW(
+            None,
+            40,
+            None,
+            0,
+            buffer,
+        ),
+    )
+    value = cast(str, buffer.value)
+    if result != 0 or not value:
+        raise ValueError("profile-unavailable")
+    return Path(value)
+
+
+def resolve_user_profile(
+    environment: Mapping[str, str] | None = None,
+    *,
+    known_folder: Callable[[], Path] | None = None,
+) -> Path:
+    """Resolve one explicit profile boundary without calling Path.home()."""
+    source = os.environ if environment is None else environment
+    declared = source.get("USERPROFILE", "").strip()
+    home = source.get("HOME", "").strip()
+    drive = source.get("HOMEDRIVE", "").strip()
+    tail = source.get("HOMEPATH", "").strip()
+    drive_home = drive + tail if drive and tail else ""
+    values = [value for value in (declared, home, drive_home) if value]
+    if values:
+        declared_paths = [Path(value) for value in values]
+        for path in declared_paths:
+            if (
+                not path.is_absolute()
+                or path.is_symlink()
+                or path.is_junction()
+            ):
+                raise ValueError("profile-invalid")
+        resolved = [path.resolve() for path in declared_paths]
+        normalized = {os.path.normcase(str(value)) for value in resolved}
+        if len(normalized) != 1:
+            raise ValueError("profile-mismatch")
+        profile = resolved[0]
+    else:
+        resolver = known_folder or _windows_known_profile
+        profile = resolver().resolve()
+    if not profile.is_absolute() or profile.is_symlink():
+        raise ValueError("profile-invalid")
+    return profile
+
+
+def local_zotero_status(
+    config: Mapping[str, object] | None = None,
+) -> dict[str, bool | int]:
+    """Return value-free local Zotero readiness without API access."""
+    source = cast(
+        Mapping[str, object],
+        load_config() if config is None else config,
+    )
+    raw_zotero = source.get("zotero", {})
+    zotero: Mapping[str, object]
+    if isinstance(raw_zotero, dict):
+        zotero = cast(dict[str, object], raw_zotero)
+    else:
+        zotero = {}
+    raw_collections = zotero.get("collections", {})
+    collections: Mapping[str, object]
+    if isinstance(raw_collections, dict):
+        collections = cast(dict[str, object], raw_collections)
+    else:
+        collections = {}
+    raw_pdf_dir = zotero.get("pdf_dir", "")
+    pdf_dir = raw_pdf_dir.strip() if isinstance(raw_pdf_dir, str) else ""
+
+    def configured(value: object) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    return {
+        "api_key_configured": configured(zotero.get("api_key")),
+        "collection_count": sum(
+            1
+            for topic, value in collections.items()
+            if configured(topic) and configured(value)
+        ),
+        "email_configured": configured(
+            zotero.get("email", source.get("unpaywall_email"))
+        ),
+        "pdf_dir_configured": bool(pdf_dir),
+        "pdf_dir_exists": bool(
+            pdf_dir
+            and Path(pdf_dir).is_dir()
+            and not Path(pdf_dir).is_symlink()
+        ),
+        "user_id_configured": configured(zotero.get("user_id")),
+    }
+
+
+def get_runtime_policy(config: JsonObject | None = None) -> JsonObject:
+    """Return canonical safe runtime config without environment selection."""
+    source = load_config() if config is None else config
+    return resolve_runtime_policy(source).config_value()
 
 
 def load_config():
@@ -57,6 +168,7 @@ def load_config():
             "unpaywall_email": os.environ.get("UNPAYWALL_EMAIL", ""),
         }
 
+    resolve_runtime_policy(_config_cache)
     return _config_cache
 
 
@@ -65,67 +177,8 @@ def get_zotero_api_key():
     return cfg.get("zotero", {}).get("api_key", "") or os.environ.get("ZOTERO_API_KEY", "")
 
 
-def get_google_key():
-    """Google(Gemini) API 키. env(GOOGLE_API_KEY/GEMINI_API_KEY) 우선, 없으면
-    config.json(gemini_api_key/google_api_key). figure 검증·TTS·임베딩 공용 해석기.
-
-    참고: figure 검증처럼 'env 키 유무'를 Gemini on/off 스위치로 쓰던 호출부는
-    이 함수가 config.json 까지 보므로 env 를 pop 해도 키가 남는다. 그런 곳은
-    PAPER_CURATION_NO_GEMINI 환경 플래그로 명시 비활성화한다
-    (reextract_figures.py 의 geometric-only 모드 참조)."""
-    cfg = load_config()
-    return (os.environ.get("GOOGLE_API_KEY")
-            or os.environ.get("GEMINI_API_KEY")
-            or cfg.get("gemini_api_key", "")
-            or cfg.get("google_api_key", "")) or ""
 
 
-def get_local_model_config():
-    """로컬 LLM fallback (Ollama / LM Studio / llama.cpp / vLLM) 설정.
-
-    OpenAI 호환 엔드포인트 한 개를 가정한다. 환경변수가 config.json 보다 우선.
-    base_url 과 model 이 둘 다 있어야 유효하고, 그렇지 않으면 None 을 반환해
-    호출자가 "로컬 fallback 미설정" 으로 조용히 건너뛰게 한다.
-
-    config.json 예시::
-
-        "local_model": {
-          "base_url": "http://localhost:11434/v1",
-          "model": "qwen2.5:7b-instruct",
-          "api_key": "ollama",      # 로컬 서버는 대개 무시하지만 SDK 가 비어있으면 거부
-          "batch_size": 8,          # (선택) 로컬 연결 배치 크기
-          "timeout": 300            # (선택) per-call 초
-        }
-    """
-    cfg = load_config().get("local_model", {}) or {}
-    base_url = os.environ.get("LOCAL_MODEL_BASE_URL") or cfg.get("base_url")
-    model = os.environ.get("LOCAL_MODEL_NAME") or cfg.get("model")
-    if not base_url or not model:
-        return None
-    out = {
-        "base_url": base_url,
-        "model": model,
-        "api_key": os.environ.get("LOCAL_MODEL_API_KEY") or cfg.get("api_key") or "local",
-    }
-    if cfg.get("batch_size"):
-        out["batch_size"] = int(cfg["batch_size"])
-    if cfg.get("timeout"):
-        out["timeout"] = float(cfg["timeout"])
-    if cfg.get("reasoning_effort"):
-        # thinking 모델(EXAONE-4.5 등): "none" 이면 think OFF — 없으면 content 가
-        # 빈 채 thinking 채널만 채우는 모델이 있다 (lib/local_llm.chat_json 참조)
-        out["reasoning_effort"] = str(cfg["reasoning_effort"])
-    if cfg.get("json_mode"):
-        # response_format json_object — 서버 문법 제약으로 JSON 유효성 보장
-        out["json_mode"] = True
-    if cfg.get("num_ctx"):
-        # Ollama 네이티브 경로 전용: 요청 단위 컨텍스트(기본 8192). 신형 Ollama 가
-        # 모델 최대치(128K+)로 로드해 느려지는 것을 요청 단위로 줄인다.
-        out["num_ctx"] = int(cfg["num_ctx"])
-    if cfg.get("retries"):
-        # 형식 깨짐은 확률적이라 배치당 재시도 횟수(기본 2)
-        out["retries"] = int(cfg["retries"])
-    return out
 
 
 def get_zotero_user_id():
@@ -355,20 +408,3 @@ def get_topic_dir(topic: str) -> Path:
 def get_papers_index_path() -> Path:
     """papers/_papers_index.json 경로 반환."""
     return PAPERS_DIR / "_papers_index.json"
-
-# ---------------------------------------------------------------------------
-# Gemini usage instrumentation (dashboard 종량제 그래프)
-# ---------------------------------------------------------------------------
-# Every pipeline entry point imports config_loader, and so does the PaperBanana
-# wrapper (lib/paperbanana.py) before it runs PaperBanana's agents in-process.
-# Installing the google-genai monkey-patch here guarantees that *all* Gemini
-# calls report token usage to PC_USAGE_ENDPOINT — the pipeline's own
-# generate_content/TTS *and* PaperBanana's image + agent calls, which build
-# their own genai.Client and never call usage_log directly. Failure-swallowing;
-# never fatal to config loading.
-try:
-    import usage_log as _usage_log
-
-    _usage_log.instrument_genai()
-except Exception:
-    pass

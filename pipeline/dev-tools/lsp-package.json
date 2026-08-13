@@ -1,0 +1,1 @@
+{"name":"paper-curation-dev-tools","private":true,"version":"1.0.0","dependencies":{"@biomejs/biome":"2.5.6","@biomejs/cli-win32-x64":"2.5.6","basedpyright":"1.39.9"}}

@@ -4,11 +4,50 @@
 
 **If you have PDFs in a Zotero collection, the rest is automatic.**
 
-Turn hundreds of papers into structured Korean reviews, auto-classify them with AI, and ask natural-language questions grounded in the actual papers. A **personal research knowledge system** that runs locally; deployment is optional. Orchestrated by Claude Code.
+Turn hundreds of papers into structured Korean reviews, auto-classify them with AI, and ask natural-language questions grounded in the actual papers. A **personal research knowledge system** that runs locally. Orchestrated by local Codex (ChatGPT saved-auth — no paid API keys).
 
 ![Paper Curation pipeline](workflow.png)
 
 > 🐱 **The whole pipeline in one picture** — collection, review, classification, related-paper linking, timelines, Deep Research, and deploy, all handled by cats.
+
+---
+
+## Release Status and Versioning
+
+The current project version is **0.1.0**. The repository-root
+[`VERSION`](VERSION) file is the single source of truth, and release notes live
+in [`CHANGELOG.md`](CHANGELOG.md).
+
+### 0.1.0 — 2026-08-08
+
+This release completes the local release path:
+
+- Codex saved-auth (ChatGPT login) Terra/Luna generation gateway with paid API
+  fallback permanently denied
+- Fail-closed setup, doctor, and `run_full` policy boundaries with auditable
+  release evidence
+- BM25-first retrieval and local Deep Research answer serving
+- One-paper fixture coverage for curation, cache, resume, and release checks
+- Attested Codex CLI `0.147.0` boundary requalification
+- Release-gate evidence: `238 passed, 0 failed, 0 skipped`; F1–F4 final gates
+  PASS
+
+> Note: broad `unittest discover` also collects legacy metrics tests outside
+> the release gate. They currently report a missing `python-dateutil`
+> environment dependency and stale pipeline-wiring assertions (3 errors, 1
+> failure); these are pre-existing and not caused by this release diff.
+
+### Versioning rules
+
+- Use **Semantic Versioning** (`MAJOR.MINOR.PATCH`).
+- Before `1.0.0`, compatible bug fixes, documentation, and tests increment
+  PATCH; new features or CLI/config/schema behavior increment MINOR.
+- After `1.0.0`, incompatible CLI/config/schema or persisted-data changes
+  increment MAJOR.
+- Every release updates `VERSION`, `CHANGELOG.md`, and the README release
+  summary, then uses a `vMAJOR.MINOR.PATCH` Git tag after verification.
+- The project version is independent from the Codex CLI pin. The current
+  Codex CLI pin is `0.147.0` in `pipeline/codex-cli-policy.json`.
 
 ---
 
@@ -20,10 +59,10 @@ Features are split into **Core** (always produced by the default pipeline) and *
 
 | Feature | Description |
 |---------|-------------|
-| **Structured Review** | Extracts text/figures from PDF. Claude generates 6-section Korean reviews (Essence-Motivation-Achievement-How-Originality-Evaluation) |
-| **Auto-Classification** | Bottom-up topic modeling (SPECTER2 + HDBSCAN + UMAP) creates categories and assigns papers automatically |
-| **Related Papers** | Claude Sonnet curates per-paper connections from embedding top-20 candidates — relation type (alternative/extension/…) + one-sentence Korean reason. Network-resilient: multi-round retry + zero-connection-papers-first ordering |
-| **Deep Research (multi-backend)** | Natural-language Q&A with hybrid search (BM25 + dense) + LLM answers grounded in paper text. Prefix-detects the key and routes to **Anthropic · OpenAI · Google** automatically. Natural prose + clickable `[N]` citation chips |
+| **Structured Review** | Extracts text/figures from PDF. Codex generates 6-section Korean reviews (Essence-Motivation-Achievement-How-Originality-Evaluation) |
+| **Auto-Classification** | Bottom-up topic modeling (SPECTER2 + HDBSCAN + UMAP) creates categories and assigns papers automatically — no LLM calls |
+| **Related Papers** | Codex curates per-paper connections from embedding top-20 candidates — relation type (alternative/extension/…) + one-sentence Korean reason. Network-resilient: multi-round retry + zero-connection-papers-first ordering |
+| **Deep Research (multi-backend)** | Natural-language Q&A with BM25 search (default) + LLM answers grounded in paper text. Reader BYOK answers: prefix-detects the key and routes to **Anthropic · OpenAI · Google** automatically. Natural prose + clickable `[N]` citation chips |
 | **Audio Overview** | Generates a **2-3 speaker Korean podcast (Gemini TTS)** from any review or Deep Research answer. Runs in-browser → MP3 encoded client-side → download + (when deployed) **automatic email delivery with attachment** |
 | **Timeline Visualization** | Per-category research trend narratives + auto-generated diagrams (PaperBanana) |
 | **Knowledge Compounding** | Obsidian integration: your notes feed back into future queries |
@@ -34,12 +73,13 @@ Features are split into **Core** (always produced by the default pipeline) and *
 
 | Feature | How to enable | Description |
 |---------|---------------|-------------|
-| **Content Deploy (O-1)** | `--mode deploy` | Cloudflare Workers (static assets + `/api/embed` + `/api/audio-email`) + gh-pages redirect stubs. Deploying activates Audio Overview email delivery |
 | **Research Insights + Network (O-2)** | `--insights` | Cross-category insight analysis + regenerates the interactive UMAP 2D/3D network (category filters, ego network, hub/bridge) |
-| **Local LLM fallback** | `--local-fallback` | When Related Papers generation is blocked by network failures to the very end, a local model (Ollama/LM Studio/…) completes the remainder. Requires a `local_model` block in config.json |
+| **Dense search boost** | `build_search_index.py --with-dense` | Adds Google `gemini-embedding-001` embeddings (BYOK). Default index is BM25-only |
 | **Workflow diagram** | `generate_workflow.py` | Generates the cat pipeline diagram at the top of this README (PaperBanana, `--style cat/fairy/academic`) |
 
-**What you need**: A Zotero collection with PDFs + API keys (required: Anthropic · Google · Zotero Web API). Search embeddings use Google `gemini-embedding-001`, so no separate OpenAI key is needed (OpenAI is optional — reader BYOK answers / insights fallback).
+> **Disabled features**: `--mode deploy` (Cloudflare publishing) and `--local-fallback` (local-LLM fallback) have been removed from `run_full` — they are no longer supported.
+
+**What you need**: A Zotero collection with PDFs + **Codex saved-auth** (ChatGPT login). No paid API keys are required — search is BM25-only by default, so no embedding key is needed either (Google key is optional for dense boost / figure validation / TTS).
 
 ---
 
@@ -71,13 +111,11 @@ pip install -r requirements.txt
 #    The orchestrator then runs topic modeling/classification in-process (no
 #    subprocess), since the clustering libraries live in this same env.
 
-# 4) Required API keys (reviews = Anthropic; search embeddings / figure validation / TTS = Google).
-#    Search embeddings use Google gemini-embedding-001, so OpenAI is optional (BYOK answers / insights fallback).
-export ANTHROPIC_API_KEY=sk-ant-...
-export GOOGLE_API_KEY=...
+# 4) No paid API keys needed — generation uses Codex saved-auth (ChatGPT login).
+#    (Optional: GOOGLE_API_KEY only for dense embeddings / figure validation / TTS)
 
 # 5) Create config.json (interactive) → first pipeline run
-python pipeline/setup.py
+PYTHONUTF8=1 python pipeline/setup.py
 #    If your PDFs are already in Zotero, go straight to:
 PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode curate --source zotero
 PYTHONUTF8=1 python pipeline/serve_local.py   # → browse at http://localhost:8000
@@ -104,7 +142,7 @@ Checklist — get these ready and the first run won't stall:
 | Item | Details |
 |------|---------|
 | **Zotero** | [API Key](https://www.zotero.org/settings/keys) + a collection with paper PDFs |
-| **API keys** | `ANTHROPIC_API_KEY` (reviews/insights — **required**), `GOOGLE_API_KEY` (search embeddings `gemini-embedding-001` / figure validation / TTS — **required**), `RESEND_API_KEY` (Audio Overview email when deployed — required for deploy), `OPENAI_API_KEY` (reader BYOK answers / insights fallback — optional) |
+| **Codex saved-auth** | ChatGPT login stored (`codex login status` → `Logged in using ChatGPT`). Terra (long-form) / Luna (short-form) roles. No paid API keys |
 | **conda env** | `py312` (Python 3.12) — created by the commands below |
 | **Java Runtime** | For `opendataloader-pdf`'s PDF extraction. macOS: `brew install --cask temurin`. Without it the pipeline falls back to PyMuPDF (lower table/structure quality) |
 
@@ -120,15 +158,15 @@ Because `requirements.txt` includes umap-learn / hdbscan / sentence-transformers
 
 ### Verify your install
 
-Before launching the long pipeline, confirm the dependencies actually landed:
+Before launching the long pipeline, run the doctor to confirm the environment, Codex saved-auth, and Zotero connectivity:
 
-```bash
-python -c "import umap, hdbscan, sentence_transformers, fitz, sklearn, anthropic; print('py312 OK')"
+```bash paper-curation-command
+PYTHONUTF8=1 python pipeline/doctor.py --format json
 ```
 
-`OK` means you're ready. To preview the execution plan first, use `--dry-run`:
+`status: ready` means you're ready. To preview the execution plan first, use `--dry-run`:
 
-```bash
+```bash paper-curation-command
 PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode curate --source zotero --dry-run
 ```
 
@@ -139,9 +177,12 @@ PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode curate --source
 | `op_CALL_KW: pop from empty list` (numba traceback) | Classification ran outside the `py312` env | `conda activate py312` and re-run |
 | `ModuleNotFoundError: umap` / `hdbscan` / `sentence_transformers` | Missing dependency | Activate the env and run `pip install -r requirements.txt` (it includes umap-learn / hdbscan / sentence-transformers) |
 | Figures look low-quality / tables broken | Java missing → PyMuPDF fallback | `brew install --cask temurin` (macOS), then re-run |
+| `Not logged in` / Codex call refused | No ChatGPT saved-auth | `codex login status`; the `codex exec` canary must report `Logged in using ChatGPT` |
+| Codex usage limit reached | Subscription credit exhausted | Wait for credit reset, then resume from the failed stage with `--resume`. No paid-key fallback |
 | SPECTER2 / arXiv download hangs (Korean network) | huggingface LFS / arXiv blocked | Use the S3 mirror command in "Korean-network workarounds" below |
 | `[COLLECTION_ERROR]` | Wrong Zotero collection name | Pick the correct name from the listed available collections, then re-run |
-| Search index builds with empty embeddings | `GOOGLE_API_KEY` not set | `export GOOGLE_API_KEY=...`, then re-run — search embeddings use Google `gemini-embedding-001` |
+| Search index builds BM25-only | Normal — BM25 is the default | Optional dense boost: `build_search_index.py --with-dense` (needs Google key, BYOK) |
+| `policy_denied` (exit 3) | `--llm-mode off` or `allow_paid_api: true` attempt | Expected policy block. Switch to `codex` mode or run deterministic stages only |
 
 ---
 
@@ -212,12 +253,9 @@ Local use is the default. For sharing, a **3-tier split-host** architecture depl
 | **GitHub `gh-pages` branch** | Entry-URL → Cloudflare redirect | Per-topic redirect stubs (<1KB), `jehyunlee.github.io/paper-curation/{topic}/` → the operator-configured Cloudflare URL |
 | **GitHub `master` branch** | Code / config / README only | Large `docs/papers/`, `docs/{topic}/` content is `.gitignore`'d |
 
-```bash
-# Deploy (requires env: CF_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)
-PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode deploy
-```
+> **⚠ Deploy is disabled**: `run_full --mode deploy` was removed (exit 2). The Cloudflare/gh-pages hosting below describes the **existing** deployed topics (humanoid · physical-ai) and remains for manual re-deploys via `pipeline/prepare_deploy.py` only — new local topics (ai4s/scisci) are local-only.
 
-Automatic: PNG → WebP conversion (~60% smaller) · API keys and local-only emails stripped from deployed HTML (local working tree restored after push) · `npx wrangler deploy` → Cloudflare (hash-based incremental upload, Worker deployed in the same step) · gh-pages redirect-stub idempotent sync · Cloudflare 200-OK verification (polls up to 5 min) · only code/config pushed to master (content is gitignored).
+Automatic (manual re-deploy only): PNG → WebP conversion (~60% smaller) · API keys and local-only emails stripped from deployed HTML (local working tree restored after push) · `npx wrangler deploy` → Cloudflare (hash-based incremental upload, Worker deployed in the same step) · gh-pages redirect-stub idempotent sync · Cloudflare 200-OK verification (polls up to 5 min) · only code/config pushed to master (content is gitignored).
 
 **Custom domain (recommended)** — add a `[[routes]]` block to `wrangler.toml` (`pattern`, `custom_domain = true`, `zone_name`); `wrangler deploy` provisions DNS, SSL, and routing. Update `prepare_deploy.py`'s `CF_BASE_URL` so the gh-pages stubs point at it. The default `*.workers.dev` URL works too, but a custom domain matters for email consistency.
 
@@ -243,7 +281,7 @@ Starting from a DOI or a locally reviewed paper, Citedby collects citing papers 
 OpenAlex, Scopus, Semantic Scholar, and arXiv, then produces a self-contained HTML
 report explaining how the research landscape changed over time.
 
-```bash
+```bash paper-curation-command
 PYTHONUTF8=1 python pipeline/run_citedby.py \
   --doi 10.xxxx/xxxxx \
   --pdf-first --build-index --serve --open
@@ -270,7 +308,7 @@ PYTHONUTF8=1 python pipeline/run_citedby.py \
 
 Three axes (`--mode` / `--source` / `--images`). `--source web` auto-chains search → register → sync.
 
-```bash
+```bash paper-curation-command
 # Weekly — search → register to Zotero → sync → review new papers
 PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode curate --source web --days 7
 
@@ -280,7 +318,7 @@ PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode curate --source
 # Re-review specific slugs (audit/recovery)
 PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode rebuild --slugs 088,1093 --strict-pdf
 
-# Reclassify only (HDBSCAN approximate_predict + centroid fallback, no LLM calls)
+# Reclassify only (HDBSCAN approximate_predict + centroid fallback)
 PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode reclassify
 
 # Also generate cross-category Research Insights (opt-in — Core runs paper-connections only)
@@ -288,9 +326,6 @@ PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode curate --source
 
 # Regenerate timelines (narratives + images)
 PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode retime --images all
-
-# Deploy only (requires CF_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)
-PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode deploy
 
 # Dry run — show execution plan
 PYTHONUTF8=1 python pipeline/run_full.py --topic my_topic --mode curate --source web --dry-run
@@ -304,22 +339,15 @@ PYTHONUTF8=1 python pipeline/serve_local.py   # localhost:8000 + /api/embed + /a
 - **rebuild** — regenerate all review.md. Requires `--yes` or `--slugs`
 - **reclassify** — keep reviews, reassign categories (node-based)
 - **retime** — regenerate narratives + timeline images
-- **deploy** — run `prepare_deploy.py` only (split-host: Cloudflare + gh-pages stubs + master code push)
+- **deploy** — **removed** (exit 2). Manual `prepare_deploy.py` only for existing deployed topics
+
+LLM mode (`--llm-mode`): `codex` (default — saved-auth generation) | `off` (deterministic stages only, policy-denied exit 3). Paid API mode does not exist — `allow_paid_api: true` is permanently rejected.
 
 Safety flags: `--strict-pdf` (block fuzzy PDF match), `--slugs A,B,C`, `--dry-run`, `--skip-dedup`, `--dedup-execute`, `--insights`, `--yes`.
 
-### Concurrency Tuning by Anthropic Tier
+### Concurrency Tuning
 
-`--concurrency N` in the review step controls a paper-level `ThreadPoolExecutor`. Work is I/O bound (Anthropic + Gemini APIs), so the ceiling is **Anthropic's rate limits (RPM / ITPM)**, not the machine. Assume ~30–50K input tokens, ~5–10K output, ~60 s per paper:
-
-| Tier | Sonnet RPM (approx) | ITPM (approx) | Recommended `--concurrency` | Notes |
-|------|---------------------|---------------|-----------------------------|-------|
-| Free / 1 | 50 | 30K | **2–4** | ITPM caps you first. Be conservative. |
-| 2 | 1,000 | 80K | **6–8** | Safe |
-| 3 | 2,000 | 200K | **10–12** | 429s are rare |
-| **4** | **4,000** | **400K+** | **16–20 (default 16)** | New default. Pushing higher risks ITPM ceiling. |
-
-Default `--concurrency 16` targets **Tier 4**. Tier 1–3 users should pass a lower value explicitly — 429s are retried via the checkpoint, but resume overhead accumulates.
+`--concurrency N` in the review step controls a paper-level `ThreadPoolExecutor`. Work is I/O bound (Codex `codex exec` calls), and Codex generation is serialized per topic lease, so concurrency above ~4 rarely helps and can exhaust Codex credits faster. Recommended: **2–4** for weekly cycles (~20–30 min for ~80 papers at 16, ~1.5h at 4). Credit exhaustion (usage-limit) fails the generation stage cleanly — resume with `--resume` after the limit resets; there is no paid-key fallback.
 
 ### Korean-network workarounds — SPECTER2 / arXiv
 
@@ -342,14 +370,7 @@ PYTHONUTF8=1 python pipeline/search_papers.py --topic scisci --since 2026-04-01 
 
 OpenAlex returns 1k+ items per keyword and dominates the result pool, so missing arXiv rarely degrades coverage.
 
-**3. Korean-network ↔ Anthropic stale connections** — on bad days the Related Papers step (batched Sonnet calls) gets stuck on half-open sockets. Defenses are automatic (multi-round retry + zero-connection-papers-first + anything unfinished keeps its previous connections and self-heals next cycle). If you run a local model, `--local-fallback` completes the remainder on the spot:
-
-```bash
-# Add a local_model block to config.json (Ollama example — measured: EXAONE-4.0-32B, ~32s per 8-paper batch)
-PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source zotero --local-fallback
-```
-
-Ollama is auto-detected and served via its native API; LM Studio/llama.cpp/vLLM use the OpenAI-compatible path. A dead endpoint is skipped silently.
+**3. Korean-network ↔ Codex stale connections** — on bad days the Related Papers step (batched Codex calls) gets stuck on half-open sockets. Defenses are automatic (multi-round retry + zero-connection-papers-first + anything unfinished keeps its previous connections and self-heals next cycle).
 
 ---
 
@@ -364,14 +385,14 @@ Safety nets added through recent refactors:
 
 | Guard | Description |
 |-------|-------------|
-| `run_full.py` orchestrator | 3-axis (`--mode/--source/--images`) single entrypoint. Auto-chains search·register·sync·review·post-processing·deploy. Prints a dry-run plan. |
+| `run_full.py` orchestrator | 3-axis (`--mode/--source/--images`) single entrypoint. Auto-chains search·register·sync·review·post-processing. Fail-closed: policy resolved once, artifact validation gates success, dry-run is strictly inert. |
 | `find_pdf()` ID-first | Zotero attachment → DOI → arXiv → strict fuzzy. Eliminates past fuzzy-mismatch incidents. |
 | `--strict-pdf` | Blocks fuzzy matching entirely. Recommended for fresh reviews and recovery. |
 | `classify_papers.py` (Phase 3) | SPECTER2 embedding → UMAP transform 5D → `hdbscan.approximate_predict` → outlier (-1) forced to nearest 768D centroid → `all_categories` = top-N parents. Zero LLM calls, runs in the `py312` env. |
 | `find_pdf()` cross-platform basename | Handles Zotero linked attachments stored as Windows absolute paths (`C:\Users\…\foo.pdf`). |
 | `make_slug()` 40-char collision fix | Compare length is `min(40, min(len(a), len(b)))` with a 10-char floor, preventing different papers from colliding on a short prefix. |
 | `_zotero_text_sanity()` Korean/ASCII dual pass | Handles Zotero items with Korean titles but English PDFs (Hangul-aware keyword extraction + ASCII-only fallback). |
-| `extract_insights` 3-backend fallback | Cross-category insights: Anthropic → OpenAI → Gemini. Override via `EXTRACT_INSIGHTS_CC_BACKENDS`; each backend forced into the same tool-use schema. |
+| `extract_insights` Codex-only | Cross-category insights via Codex gateway. No paid-backend fallback. |
 | `run_step()` CRITICAL_STEPS hard-fail | `build_papers_index` / `topic_modeling*` / `classify_papers` raise on failure, aborting the run (no stale classifications downstream). Degradable steps (narrative, images, search index) soft-fail. |
 | `audit_matching.py` / `fix_matching.py` | Duplicate text.md detection + 4-axis cross-check; audit-driven artifact deletion + re-review command (dry-run by default). |
 | `dedup_zotero.py` | Zotero-collection dedup (title-60 + DOI + arXiv + shared-PDF). Auto-integrated as preflight. |
@@ -395,9 +416,9 @@ For calling parts of the pipeline from other code or tuning performance.
 
 **LLM call caching — `api/_llm.cached_call`** — SHA-256 of `(prompt, model, schema_version)` keys a JSON cache (`docs/{topic}/.llm_cache/` and per-paper `docs/papers/{slug}/.llm_cache/`). Re-runs on unchanged input issue zero LLM calls; bypass with `force=True`. The Deep Research index adds a content-addressed embedding cache, so an unchanged chunk is never re-embedded.
 
-**Category-level ThreadPool parallelism** — LLM I/O stages parallelize by category (~4× wall-clock). Worker counts via env vars: `CAT_SUMMARY_PARALLEL` (8, Haiku), `TIMELINE_NARRATIVE_PARALLEL` (8, Opus), `TIMELINE_IMAGE_PARALLEL` (4, Gemini image), `EXTRACT_INSIGHTS_PARALLEL` (4, Sonnet). Lower these under Tier 1–3.
+**Category-level ThreadPool parallelism** — LLM I/O stages parallelize by category (~4× wall-clock). Worker counts via env vars: `CAT_SUMMARY_PARALLEL` (8), `TIMELINE_NARRATIVE_PARALLEL` (8), `TIMELINE_IMAGE_PARALLEL` (4), `EXTRACT_INSIGHTS_PARALLEL` (4). Lower these if Codex credits are tight.
 
-**Tool-use schema enforcement** — LLM responses go through Anthropic tool-use schemas (`emit_review` Haiku, `emit_insights` Sonnet, `emit_connections` Sonnet) so JSON parse jitter is zero and post-hoc fixers were deleted.
+**Schema-enforced generation** — Codex generation goes through the gateway's output schemas (`emit_review`, `emit_insights`, `emit_connections`) so JSON parse jitter is zero and post-hoc fixers were deleted.
 
 **Figure pre-validator — `api/extract.pre_validate_figure`** — cheap heuristics (file < 4 KB, dimension < 100 px, grayscale variance < 30) skip ~30% of Gemini figure-validation calls, returning Gemini's response shape so callers don't branch.
 
@@ -417,7 +438,7 @@ For calling parts of the pipeline from other code or tuning performance.
 | **Figures** | Not supported | Auto-extracted + inline |
 | **Visualization** | None | Timeline diagrams + UMAP 2D/3D network |
 | **Knowledge compounding** | Wiki-link based | Obsidian wiki-links + notes re-indexed into answers |
-| **Installation** | Manual setup | One-line Claude Code install |
+| **Installation** | Manual setup | One-line Codex install |
 
 ```
 Deep Research query -> Obsidian note -> re-index -> your notes cited in next query
@@ -431,10 +452,10 @@ Deep Research query -> Obsidian note -> re-index -> your notes cited in next que
 
 | Category | Items |
 |----------|-------|
-| **Required** | Python 3.12 (macOS conda env `py312`), Zotero (API Key + collection + PDFs) |
-| **APIs** | Anthropic (Claude Haiku/Sonnet/Opus), Google (Gemini + `gemini-embedding-001` search embeddings), Zotero Web API, Resend (Audio Overview email when deployed). OpenAI is optional (reader BYOK answers / insights fallback) |
-| **Python** | `pip install -r requirements.txt` — anthropic, openai, google-genai, pymupdf, Pillow, requests, pyzotero, opendataloader-pdf, numpy, scikit-learn, joblib, umap-learn, hdbscan, sentence-transformers |
-| **Optional** | Obsidian (notes/Graph View), PaperBanana (timeline images), Zotero Desktop (one-click PDF) |
+| **Required** | Python 3.12 (conda env `py312`), Zotero (API Key + collection + PDFs), Codex saved-auth (ChatGPT login) |
+| **Generation** | Codex `codex exec` gateway — Terra (long-form) / Luna (short-form) roles. No paid API keys |
+| **Python** | `pip install -r requirements.txt` — pymupdf, Pillow, requests, pyzotero, opendataloader-pdf, numpy, scikit-learn, joblib, umap-learn, hdbscan, sentence-transformers |
+| **Optional** | Obsidian (notes/Graph View), PaperBanana (timeline images), Zotero Desktop (one-click PDF), `GOOGLE_API_KEY` (dense embeddings / figure validation / TTS) |
 
 ---
 
@@ -449,4 +470,4 @@ This project was presented at **AAiCON 2026** (National Science Museum, Daejeon,
 
 ---
 
-*Built with Claude Code.* 🐱
+*Built with Codex.* 🐱

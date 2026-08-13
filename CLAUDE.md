@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Academic paper curation pipeline. Papers are fetched from Zotero, reviewed via Claude/Gemini APIs, classified into categories, and published as a searchable HTML index with per-paper review pages. Topic pages also expose a **Deep Research UI** that performs client-side RAG against a pre-built embedding index (Google `gemini-embedding-001`, 768d int8, task-typed) and streams Claude answers with `[ref:N]` citations and inline figures. Retrieval is hybrid BM25+dense fused with RRF and LLM re-ranked; query embeddings are computed for the reader by the worker `/api/embed` route (deployed) or `pipeline/serve_local.py` (local), so readers need no API key for retrieval — keys (BYOK) are only for answer generation.
+Academic paper curation pipeline. Papers are fetched from Zotero, reviewed via local Codex (ChatGPT saved-auth, Terra/Luna roles), classified into categories, and published as a searchable HTML index with per-paper review pages. Topic pages also expose a **Deep Research UI** that performs client-side RAG against a pre-built BM25 index (dense hybrid optional) and streams answers with `[ref:N]` citations and inline figures. Query embeddings are computed for the reader by the worker `/api/embed` route (deployed) or `pipeline/serve_local.py` (local), so readers need no API key for retrieval — keys (BYOK) are only for answer generation.
 
 - **Topics**: Configured per-user in `config.json` (e.g., `ai4s`, `scisci`, `bioml`). Per-topic Core-1 search keywords are configurable via the `search_keywords` block (`{topic: {primary: [...], secondary: [...]}}`); `ai4s`/`scisci` ship built-in defaults, so new topics add their own there.
 - **Deploy architecture** (split hosting):
@@ -14,7 +14,7 @@ Academic paper curation pipeline. Papers are fetched from Zotero, reviewed via C
   - User access: `jehyunlee.github.io/paper-curation/{topic}/` → gh-pages stub → Cloudflare URL → full content.
 - **Language**: All reviews are written in Korean with technical terms in English
 
-## Installation Flow (Claude Code)
+## Installation Flow (Codex)
 
 사용자가 "여기에 paper-curation을 설치해줘: https://github.com/jehyunlee/paper-curation" 같은 요청을 하면, 아래 순서대로 진행한다.
 
@@ -34,15 +34,15 @@ pip install anthropic google-genai pymupdf Pillow requests opendataloader-pdf
 5. **Zotero PDF 저장 경로**
 6. **PaperBanana 경로** — "PaperBanana가 이미 설치된 경로가 있으면 알려주세요. 없으면 자동으로 클론합니다." (없으면 생략, setup.py가 자동 클론)
 7. **GitHub 설정** — 선택사항 (정적 호스팅 자동 배포용), 없으면 생략
-8. **GOOGLE_API_KEY** — Deep Research 검색 인덱스 빌드(`build_search_index.py`)가 Google `gemini-embedding-001` 로 임베딩하므로 **필수**다 (Figure 검증·TTS 와 공용). 환경변수에 없으면 setup.py가 직접 입력받아 `config.json` 에 저장한다. `OPENAI_API_KEY` 는 **선택** — 독자 BYOK 답변과 insights fallback 에만 쓰이고, 없어도 설치가 진행된다.
+8. **Codex saved-auth (필수)** — 모든 생성(리뷰·분류 보조·요약·연결·타임라인)은 저장된 ChatGPT Codex 로그인(`codex login status` → `Logged in using ChatGPT`)으로 동작한다. `GOOGLE_API_KEY` 는 **선택** — dense 검색 임베딩(`build_search_index.py --with-dense`)·Figure 검증·TTS 에만 쓰이고, 없어도 BM25 기본 인덱스로 설치·운영이 진행된다. `OPENAI_API_KEY` 는 **선택** — 독자 BYOK 답변 에만 쓰인다.
 
 ### Step 3: setup.py 실행 및 검증
-```bash
+```bash paper-curation-command
 PYTHONUTF8=1 python pipeline/setup.py
 ```
 setup.py는 6단계 설치 후 곧바로 첫 파이프라인을 실행한다:
 - [1/6] config.json 로드 (없으면 인터랙티브 생성)
-- [2/6] 환경변수 확인 — **`ANTHROPIC_API_KEY` 와 `GOOGLE_API_KEY` (검색 임베딩 `gemini-embedding-001` · Figure 검증 · TTS) 는 필수**. `OPENAI_API_KEY` 는 선택 (독자 BYOK 답변 · insights fallback) 이라 없어도 경고만.
+- [2/6] 환경변수 확인 — **Codex saved-auth (ChatGPT 로그인)** 확인. `GOOGLE_API_KEY` 는 선택 (dense 임베딩 · Figure 검증 · TTS) 이라 없어도 경고만.
 - [3/6] Zotero 연결 테스트 (User ID + 컬렉션 검증)
 - [4/6] PaperBanana 확인 (없으면 자동 클론)
 - [5/6] SKILL.md 생성
@@ -106,9 +106,9 @@ setup.py 출력의 "다음 단계" 섹션을 사용자에게 전달한다. 특�
 | 1.5 | `pipeline/run_metrics.py` | **피인용수·레퍼런스** — `citations.md`(이력 append + 피인용 10회↑ 인용목록) + `references.md`(DOI>URL>서지). 기본 30일 증분이라 매 사이클 태워도 비용 거의 없음. **soft step**(외부 API 장애가 파이프라인을 죽이지 않음). `--skip-metrics` 로 생략 |
 | 2 | `pipeline/build_papers_index.py` | Rebuild `_papers_index.json` with integrity fields (`text_md_sha256`, `doi_verified`, `zotero_item_key`) via atomic write |
 | 3 | `pipeline/classify_papers.py` | **HDBSCAN approximate_predict (원 설계)** — `topic_modeling` 이 저장한 `_hdbscan_model.joblib` 번들(hdbscan_model + UMAP transformer + centroids + tid→cat) 로드 → UMAP 5D 투영 → `hdbscan.approximate_predict` 로 primary sub-cluster 결정. Outlier(-1)는 768D centroid 코사인 최단점으로 강제 배정. `all_categories` 는 centroid 거리 오름차순 top-N parent. SPECTER2 임베딩은 proximity adapter + CLS pooling (업그레이드 후 새 임베딩을 반영하려면 `topic_modeling.py` 를 한 번 재실행해 `_hdbscan_model.joblib` 번들을 재생성해야 함). LLM 호출 없음. **UMAP/hdbscan/sentence-transformers env 필수** (py312 단독 — py314 금지, `_env_guard` 가 py312 로 자동 재실행) |
-| 4 | `pipeline/build_category_summaries.py` | Per-category 한글 description + sub-themes via Haiku |
-| 4.5 | `pipeline/extract_insights.py` | Paper connections via Sonnet (Core 기본). Cross-category Research Insights 생성은 **opt-in** — `run_full --insights` 일 때만. Auto Haiku-summarization fallback when prompt >988k tokens (compress toward 900k). cross-category 호출은 Anthropic → OpenAI → Gemini fallback |
-| 5 | `pipeline/generate_timelines.py` | Bottom-up timeline narrative (Opus) + PaperBanana images. Gemini retry schedule 3×60s → 2×1800s |
+| 4 | `pipeline/build_category_summaries.py` | Per-category 한글 description + sub-themes via Codex (Luna) |
+| 4.5 | `pipeline/extract_insights.py` | Paper connections via Codex (Luna, Core 기본). Cross-category Research Insights 생성은 **opt-in** — `run_full --insights` 일 때만. |
+| 5 | `pipeline/generate_timelines.py` | Bottom-up timeline narrative (Codex Terra) + PaperBanana images. Codex retry schedule 3×60s → 2×1800s |
 | 5.5 | `pipeline/generate_network.py` | D3.js force-directed network visualization |
 | 5.5 | `pipeline/generate_workflow.py` | Pipeline workflow diagram (PaperBanana, `--style cat/fairy/academic`) |
 | 6 | `pipeline/validate_papers.py` | Strict validation gate: figure refs, classification schema, category whitelist, DOI cross-validation, duplicate text.md, timeline↔category match. `--strict` exits 1 |
@@ -243,7 +243,7 @@ arXiv 가 chronic 429/timeout 인 경우 `search_papers.py --skip-arxiv` 로 우
 
 All scripts require `PYTHONUTF8=1` on Windows to avoid cp949 encoding issues. Single entrypoint is `pipeline/run_full.py` (3축: `--mode/--source/--images`); 개별 스크립트는 디버깅·복구용으로만 직접 호출.
 
-```bash
+```bash paper-curation-command
 # 주간 운영 — 검색 + Zotero 등록 + sync + 신규 리뷰
 PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source web --days 7
 
@@ -264,11 +264,8 @@ PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode reclassify
 # 타임라인 narrative + 이미지 재생성
 PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode retime --images all
 
-# 배포만: wrangler deploy → Cloudflare + gh-pages 스텁 동기화 + master 코드 push
-# (humanoid·physical-ai 만 Cloudflare; ai4s/scisci는 docs/.assetsignore 로 제외)
-# 요구 env: CF_API_TOKEN (or CLOUDFLARE_API_TOKEN) + CLOUDFLARE_ACCOUNT_ID
-# Worker secrets (1회): wrangler secret put GOOGLE_API_KEY (/api/embed) + RESEND_API_KEY (/api/audio-email)
-PYTHONUTF8=1 python pipeline/run_full.py --topic humanoid --mode deploy
+# 배포는 run_full 에서 제거됨 — 기존 배포 토픽(humanoid/physical-ai)의 재배포는
+# prepare_deploy.py 를 수동으로만 실행 (Worker secrets: wrangler secret put GOOGLE_API_KEY / RESEND_API_KEY)
 
 # 에이전트/CLI 읽기 전용 검색 — 기본 _cross, 빌드/파일 변경 없음
 python pipeline/query_search_index.py --query "scientific discovery agents" --mode bm25 --json
@@ -325,7 +322,7 @@ PYTHONUTF8=1 python pipeline/cleanup.py --execute
 
 ## Key Design Decisions
 
-- **Bottom-up topic modeling**: `topic_modeling.py`는 BERTopic 대신 sklearn HDBSCAN + UMAP을 직접 사용. HDBSCAN fine-grained clustering → c-TF-IDF 키워드 추출 (Grootendorst 2022, 클러스터=1문서 tf × 클래스 idf) → Sonnet 배치 작명 → Sonnet 카테고리 그룹핑. `min_cluster_size`를 자동 조정하여 sub-topic 40~100개를 목표로 한다.
+- **Bottom-up topic modeling**: `topic_modeling.py`는 BERTopic 대신 sklearn HDBSCAN + UMAP을 직접 사용. HDBSCAN fine-grained clustering → c-TF-IDF 키워드 추출 (Grootendorst 2022, 클러스터=1문서 tf × 클래스 idf) → Codex 배치 작명 → Codex 카테고리 그룹핑. `min_cluster_size`를 자동 조정하여 sub-topic 40~100개를 목표로 한다.
 - **Multi-class classification**: Papers get 1 `primary_category` + 1-3 `all_categories`. The topic index shows cards under every matching category.
 - **Whitelist .gitignore**: Everything is excluded by default (`*`), then only code + configs are whitelisted. Under `docs/` only `index.html` (landing redirect), `setup-guide.md`, and `.assetsignore` are tracked on master. All topic content (`docs/papers/`, `docs/humanoid/`, `docs/physical-ai/`, etc.) is gitignored — it lives locally and on Cloudflare, never on master. `wrangler deploy` uses `docs/` directly; `docs/.assetsignore` excludes ai4s/scisci and local caches from the Cloudflare upload.
 - **Two themes**: `ai4s` uses red accent (#D63423), `scisci` uses blue (#2374D6). Theme selection flows through `review_to_html.py` and `build_topic_index.py`.
@@ -333,15 +330,15 @@ PYTHONUTF8=1 python pipeline/cleanup.py --execute
 - **Slug format**: `{NNN}_{Title_first_40_chars}` where NNN is zero-padded sequence number.
 - **PDF-change auto-detect**: `run_update_force.py` 가 매 실행 시작 시 `_papers_index.json` 의 `pdf_path` 캐시와 디스크 mtime을 비교해 PDF가 review.md 보다 새 것이면 자동으로 `forced_slugs` 에 추가한다 (Zotero API 호출 0, 순수 stat). 캐시는 `find_pdf()` 성공 시 자동 적재되므로 처음 한 사이클을 돈 뒤부터 작동.
 - **Subprocess timeouts (LLM steps)**: `run_step()` 에 박힌 wall-clock cap — `topic_modeling=3600s`, `extract_insights=14400s (4h)`, `generate_timelines=21600s (6h)`. 실제 토픽 크기(논문 수)에 맞춰 한 번 늘려 둠 — 한국망↔Anthropic 응답 변동성 + paper_connections 의 카테고리×배치 곱셈 비용을 흡수.
-- **Anthropic SDK 안정화**: 모든 Anthropic client 는 `Anthropic(timeout=180.0, max_retries=4)` (streaming Opus 만 `timeout=600.0`). `generate_timelines.opus_streaming_call` 은 mid-stream `Connection reset` 을 5-회 exp backoff 로 자체 wrap (SDK 의 max_retries 가 stream 시작 후 끊김을 못 잡음). `fetch_zotero_items` 도 동일한 retry 로직 적용.
+- **Codex gateway 안정화**: 모든 Codex 생성 호출은 `codex exec` gateway(닫힌 환경 allowlist, `--ignore-user-config --ignore-rules --cd <empty>`, Terra/Luna 역할)로 수행된다. mid-stream 끊김은 5-회 exp backoff 로 자체 wrap. `fetch_zotero_items` 도 동일한 retry 로직 적용.
 - **Zotero `attachments:` URI 핸들링**: `find_pdf()` priority 1 (Zotero children API) 에서 `attachments:<filename>` 접두사를 `ZOTERO_DIR/<filename>` 으로 해석. Zotero 의 "Linked Attachment Base Directory" 설정을 따른다.
 
 ## External Dependencies
 
 - **Zotero Web API**: Collection names and API key are configured in `config.json`
-- **Anthropic API**: Claude Haiku/Sonnet for classification, reviews, summaries, and insights (`ANTHROPIC_API_KEY` env var). Deep Research UI도 같은 키를 사용 — 빌드 시 환경변수에서 읽어 HTML에 주입.
-- **Google Gemini API**: Figure validation in `pipeline/run_update_force.py`, TTS for Audio Overview, and **Deep Research embeddings** — `gemini-embedding-001` (`output_dimensionality=768`, `task_type=RETRIEVAL_DOCUMENT` for the index in `pipeline/build_search_index.py`, `RETRIEVAL_QUERY` for queries). Query embeddings are served to readers by the worker `/api/embed` route (deployed) or `pipeline/serve_local.py` (local), so readers need no key for retrieval. Key from `GOOGLE_API_KEY` env var or `config.json`. **Gotcha**: non-3072 dims come back non-normalized — L2-normalize before int8 quantization.
-- **OpenAI API (optional)**: reader BYOK answer generation + `extract_insights` cross-category fallback. No longer required for the search index. Key from `OPENAI_API_KEY` env var or the `openai_api_key` field in `config.json`.
+- **Codex (saved ChatGPT login)**: classification support, reviews, summaries, connections, and timeline narrative via the `codex exec` gateway (Terra long-form / Luna short-form roles). No API key is read or stored by application code — the attested first-party Codex child uses its own standard saved-auth mechanism internally. `--llm-mode off` runs deterministic stages only.
+- **Google Gemini API (optional)**: Figure validation in `pipeline/run_update_force.py`, TTS for Audio Overview, and optional **Deep Research dense embeddings** — `gemini-embedding-001` (`output_dimensionality=768`, `task_type=RETRIEVAL_DOCUMENT` for the index in `pipeline/build_search_index.py --with-dense`, `RETRIEVAL_QUERY` for queries). Query embeddings are served to readers by the worker `/api/embed` route (deployed) or `pipeline/serve_local.py` (local), so readers need no key for retrieval. Key from `GOOGLE_API_KEY` env var or `config.json` — **선택** (기본 BM25 인덱스는 키 불필요). **Gotcha**: non-3072 dims come back non-normalized — L2-normalize before int8 quantization.
+- **OpenAI API (optional)**: reader BYOK answer generation only. Key from `OPENAI_API_KEY` env var or the `openai_api_key` field in `config.json`.
 - **PyMuPDF (fitz)**: PDF text extraction and figure rendering
 - **Pillow**: PNG→WebP conversion in `pipeline/prepare_deploy.py`
 - **Zotero PDF storage**: Path configured in `config.json` (`zotero.pdf_dir`)

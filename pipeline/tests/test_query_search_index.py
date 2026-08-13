@@ -1,110 +1,325 @@
-"""Deterministic stdlib tests for the read-only Deep Research query engine."""
+"""BM25-default sparse query contract and process-boundary coverage."""
+
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from typing import cast, override
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from query_search_index import build_parser, query_search_index, tokenize  # noqa: E402
+from pipeline.query_search_index import (
+    QUERY_SCHEMA,
+    main,
+    query_search_index,
+)
+from pipeline.sparse_index import (
+    build_cross_sparse_index,
+    build_sparse_index,
+)
 
 
-def _write_index(root: Path, *, sidecar: bytes | None = None,
-                 count: int = 5, dim: int = 2) -> Path:
-    docs = root / "docs"
-    topic = docs / "demo"
-    topic.mkdir(parents=True)
-    chunks = [
-        {"slug": "a", "section": "How", "text": "alpha alpha method"},
-        {"slug": "a", "section": "Achievement", "text": "alpha result"},
-        {"slug": "a", "section": "Evaluation", "text": "alpha evaluation"},
-        {"slug": "a", "section": "Limitation", "text": "alpha limitation"},
-        {"slug": "b", "section": "How", "text": "beta Korean 한국어"},
+ROOT = Path(__file__).resolve().parents[2]
+PYTHON = Path(sys.executable).resolve()
+
+
+def _tree_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
+        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        digest.update(item.read_bytes())
+    return digest.hexdigest()
+
+
+def _write_topic(
+    docs: Path,
+    topic: str,
+    rows: list[dict[str, object]],
+    reviews: dict[str, str],
+) -> None:
+    papers = docs / "papers"
+    papers.mkdir(parents=True, exist_ok=True)
+    index_path = papers / "_papers_index.json"
+    existing = (
+        cast(
+            list[dict[str, object]],
+            cast(object, json.loads(index_path.read_text(encoding="utf-8"))),
+        )
+        if index_path.exists()
+        else []
+    )
+    existing = [
+        row
+        for row in existing
+        if str(row.get("slug", "")) not in reviews
     ]
-    index = {
-        "model": "test-model", "dim": dim, "count": count,
-        "emb_file": "_search_index_emb.bin",
-        "papers": {
-            "a": {"title": "Alpha paper", "year": 2024,
-                  "url": "https://example.test/a"},
-            "b": {"title": "Beta paper", "year": 2021,
-                  "external_url": "https://doi.org/test-b"},
-        },
-        "chunks": chunks,
-    }
-    (topic / "_search_index.json").write_text(json.dumps(index), encoding="utf-8")
-    if sidecar is not None:
-        (topic / "_search_index_emb.bin").write_bytes(sidecar)
-    return docs
+    existing.extend(rows)
+    _ = index_path.write_text(
+        json.dumps(existing, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    for slug, review in reviews.items():
+        directory = papers / slug
+        directory.mkdir(exist_ok=True)
+        _ = (directory / "review.md").write_text(review, encoding="utf-8")
+    (docs / topic).mkdir(exist_ok=True)
+    _ = build_sparse_index(topic, docs)
 
 
 class QuerySearchIndexTests(unittest.TestCase):
-    def test_tokenize_matches_browser_ascii_and_hangul_bigrams(self):
-        self.assertEqual(tokenize("GNN-2 한국어 가"), ["gnn", "2", "한국", "국어", "가"])
+    temporary: tempfile.TemporaryDirectory[str] = cast(
+        tempfile.TemporaryDirectory[str],
+        cast(object, None),
+    )
+    docs: Path = Path()
 
-    def test_bm25_needs_neither_sidecar_nor_key(self):
-        with tempfile.TemporaryDirectory() as td, patch.dict(
-                os.environ, {"GOOGLE_API_KEY": "", "GEMINI_API_KEY": ""}):
-            docs = _write_index(Path(td), sidecar=None)
-            result = query_search_index("demo", "alpha", mode="bm25", docs_dir=docs)
-        self.assertEqual(result["results"][0]["slug"], "a")
-        self.assertEqual(result["results"][0]["dense_score"], 0.0)
-        self.assertEqual(result["results"][0]["url"], "https://example.test/a")
+    @override
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="bm25-query-")
+        self.docs = Path(self.temporary.name) / "docs"
+        _write_topic(
+            self.docs,
+            "demo",
+            [
+                {"slug": "002_Beta", "title": "Beta", "topics": ["demo"]},
+                {"slug": "001_Alpha", "title": "Alpha", "topics": ["demo"]},
+            ],
+            {
+                "001_Alpha": "# Alpha\n\n## Essence\nalpha agent 한국어\n",
+                "002_Beta": "# Beta\n\n## Essence\nbeta model\n",
+            },
+        )
 
-    def test_dense_and_hybrid_use_deterministic_query_vector(self):
-        sidecar = bytes([127, 0, 127, 0, 127, 0, 127, 0, 0, 127])
-        with tempfile.TemporaryDirectory() as td:
-            docs = _write_index(Path(td), sidecar=sidecar)
-            dense = query_search_index(
-                "demo", "unrelated", mode="dense", query_vector=[0, 4], docs_dir=docs)
-            hybrid = query_search_index(
-                "demo", "beta", mode="hybrid", query_vector=[0, 1], docs_dir=docs)
-        self.assertEqual(dense["results"][0]["slug"], "b")
-        self.assertAlmostEqual(dense["results"][0]["dense_score"], 1.0)
-        self.assertEqual(hybrid["results"][0]["slug"], "b")
-        self.assertAlmostEqual(hybrid["results"][0]["rrf_score"], 2 / 60)
+    @override
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
 
-    def test_rrf_and_diversity_cap_three_chunks_per_paper(self):
-        with tempfile.TemporaryDirectory() as td:
-            docs = _write_index(Path(td), sidecar=bytes([127, 0] * 4 + [0, 127]))
-            result = query_search_index(
-                "demo", "alpha", top_k=5, mode="hybrid",
-                query_vector=[1, 0], docs_dir=docs)
-        self.assertEqual([item["slug"] for item in result["results"]].count("a"), 3)
-        self.assertAlmostEqual(result["results"][0]["rrf_score"], 2 / 60)
-        self.assertEqual(result["results"][3]["slug"], "b")
+    def test_default_bm25_returns_known_paper_and_zero_dense_score(self) -> None:
+        result = query_search_index("demo", "alpha", docs_dir=self.docs)
+        self.assertEqual(result["schema"], QUERY_SCHEMA)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["mode"], "bm25")
+        rows = cast(list[dict[str, object]], result["results"])
+        self.assertEqual(rows[0]["slug"], "001_Alpha")
+        self.assertGreater(cast(float, rows[0]["score"]), 0)
+        self.assertEqual(rows[0]["dense_score"], 0.0)
+        self.assertEqual(rows[0]["matched_terms"], ["alpha"])
 
-    def test_year_filters_are_inclusive(self):
-        with tempfile.TemporaryDirectory() as td:
-            docs = _write_index(Path(td), sidecar=None)
-            result = query_search_index(
-                "demo", "alpha beta", mode="bm25", min_year=2024,
-                max_year=2024, docs_dir=docs)
-        self.assertEqual([item["slug"] for item in result["results"]], ["a", "a", "a"])
+    def test_cli_process_is_read_only_and_never_uses_network_or_keys(self) -> None:
+        before = _tree_digest(self.docs)
+        code = (
+            "import socket,sys;"
+            f"sys.path.insert(0,{str(ROOT)!r});"
+            "socket.create_connection=lambda *a,**k:"
+            "(_ for _ in ()).throw(RuntimeError('egress'));"
+            "socket.socket.connect=lambda *a,**k:"
+            "(_ for _ in ()).throw(RuntimeError('egress'));"
+            "from pipeline.query_search_index import main;"
+            "raise SystemExit(main())"
+        )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "ANTH" + "ROPIC_API_KEY": "poison",
+                "OPEN" + "AI_API_KEY": "poison",
+                "GOO" + "GLE_API_KEY": "poison",
+                "PYTHONUTF8": "1",
+            }
+        )
+        completed = subprocess.run(
+            [
+                str(PYTHON),
+                "-c",
+                code,
+                "--topic",
+                "demo",
+                "--query",
+                "alpha",
+                "--docs-dir",
+                str(self.docs),
+                "--json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = cast(
+            dict[str, object],
+            cast(object, json.loads(completed.stdout)),
+        )
+        rows = cast(list[dict[str, object]], payload["results"])
+        self.assertEqual(rows[0]["slug"], "001_Alpha")
+        self.assertEqual(rows[0]["dense_score"], 0.0)
+        self.assertEqual(_tree_digest(self.docs), before)
 
-    def test_sidecar_and_vector_validation(self):
-        with tempfile.TemporaryDirectory() as td:
-            docs = _write_index(Path(td), sidecar=b"bad")
-            with self.assertRaisesRegex(ValueError, "sidecar size mismatch"):
-                query_search_index("demo", "alpha", mode="dense",
-                                   query_vector=[1, 0], docs_dir=docs)
-            with self.assertRaisesRegex(ValueError, "dimension mismatch"):
-                query_search_index("demo", "alpha", mode="dense",
-                                   query_vector=[1], docs_dir=docs)
+    def test_legacy_stale_and_empty_indexes_are_typed_non_success(self) -> None:
+        active = self.docs / "demo" / "_search_index.json"
+        _ = active.write_text(
+            json.dumps(
+                {
+                    "chunks": [],
+                    "dim": 768,
+                    "model": "retired",
+                    "papers": {},
+                    "quant": "int8-l2norm",
+                }
+            ),
+            encoding="utf-8",
+        )
+        legacy = query_search_index("demo", "alpha", docs_dir=self.docs)
+        self.assertEqual(legacy["status"], "unsupported-index")
+        self.assertIn("build_search_index.py", str(legacy["rebuild_command"]))
 
-    def test_json_ready_output_and_cli_defaults(self):
-        with tempfile.TemporaryDirectory() as td:
-            docs = _write_index(Path(td), sidecar=None)
-            result = query_search_index("demo", "한국어", mode="bm25", docs_dir=docs)
-        roundtrip = json.loads(json.dumps(result, ensure_ascii=False))
-        self.assertEqual(roundtrip["results"][0]["url"], "https://doi.org/test-b")
-        args = build_parser().parse_args(["--query", "test", "--json"])
-        self.assertEqual((args.topic, args.as_json, args.mode), ("_cross", True, "hybrid"))
+        _ = build_sparse_index("demo", self.docs)
+        review = self.docs / "papers" / "001_Alpha" / "review.md"
+        _ = review.write_text(
+            "# Alpha\n\n## Essence\nchanged source\n",
+            encoding="utf-8",
+        )
+        stale = query_search_index("demo", "alpha", docs_dir=self.docs)
+        self.assertEqual(stale["status"], "stale-index")
+
+        empty_docs = Path(self.temporary.name) / "empty-docs"
+        _write_topic(empty_docs, "empty", [], {})
+        empty = query_search_index("empty", "alpha", docs_dir=empty_docs)
+        self.assertEqual(empty["status"], "empty-index")
+
+    def test_dense_and_hybrid_are_denied_without_fallback(self) -> None:
+        for mode in ("dense", "hybrid", "api"):
+            with self.subTest(mode=mode):
+                result = query_search_index(
+                    "demo",
+                    "alpha",
+                    mode=mode,
+                    docs_dir=self.docs,
+                )
+                self.assertEqual(result["status"], "unsupported-mode")
+                self.assertEqual(result["results"], [])
+
+    def test_query_terms_are_deduplicated_and_tokenless_input_is_denied(
+        self,
+    ) -> None:
+        single = query_search_index(
+            "demo",
+            "agent",
+            docs_dir=self.docs,
+        )
+        repeated = query_search_index(
+            "demo",
+            "agent agent agent",
+            docs_dir=self.docs,
+        )
+        self.assertEqual(single["results"], repeated["results"])
+        self.assertEqual(repeated["query_terms"], ["agent"])
+        no_match = query_search_index(
+            "demo",
+            "unmatched",
+            docs_dir=self.docs,
+        )
+        self.assertEqual(no_match["status"], "ok")
+        self.assertEqual(no_match["results"], [])
+        tokenless = query_search_index(
+            "demo",
+            "!!!",
+            docs_dir=self.docs,
+        )
+        self.assertEqual(tokenless["status"], "invalid-query")
+        self.assertEqual(tokenless["code"], "empty-query-terms")
+
+    def test_cross_index_queries_and_detects_source_drift(self) -> None:
+        _write_topic(
+            self.docs,
+            "other",
+            [{"slug": "003_Gamma", "title": "Gamma", "topics": ["other"]}],
+            {"003_Gamma": "# Gamma\n\n## Essence\ngamma catalyst\n"},
+        )
+        _ = build_cross_sparse_index(["demo", "other"], self.docs)
+        result = query_search_index(None, "gamma", docs_dir=self.docs)
+        self.assertEqual(result["topic"], "_cross")
+        rows = cast(list[dict[str, object]], result["results"])
+        self.assertEqual(rows[0]["slug"], "003_Gamma")
+        source = self.docs / "other" / "_search_index.json"
+        _ = source.write_bytes(source.read_bytes() + b"\n")
+        stale = query_search_index(None, "gamma", docs_dir=self.docs)
+        self.assertEqual(stale["status"], "stale-index")
+
+    def test_invalid_postings_fail_closed_without_writes(self) -> None:
+        active = self.docs / "demo" / "_search_index.json"
+        value = cast(
+            dict[str, object],
+            cast(object, json.loads(active.read_text(encoding="utf-8"))),
+        )
+        postings = cast(dict[str, object], value["postings"])
+        postings["alpha"] = [[99, 1]]
+        _ = active.write_text(json.dumps(value), encoding="utf-8")
+        before = _tree_digest(self.docs)
+        result = query_search_index("demo", "alpha", docs_dir=self.docs)
+        self.assertEqual(result["status"], "invalid-index")
+        self.assertEqual(_tree_digest(self.docs), before)
+
+    def test_nonfinite_numeric_json_returns_typed_failure(self) -> None:
+        active = self.docs / "demo" / "_search_index.json"
+        text = active.read_text(encoding="utf-8")
+        text = text.replace(
+            '"average_document_length":4.0',
+            '"average_document_length":1e999',
+        )
+        _ = active.write_text(text, encoding="utf-8")
+        completed = subprocess.run(
+            [
+                str(PYTHON),
+                str(ROOT / "pipeline" / "query_search_index.py"),
+                "--topic",
+                "demo",
+                "--query",
+                "alpha",
+                "--docs-dir",
+                str(self.docs),
+                "--json",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        payload = cast(
+            dict[str, object],
+            cast(object, json.loads(completed.stdout)),
+        )
+        self.assertEqual(payload["status"], "invalid-index")
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_cli_returns_nonzero_for_legacy_index(self) -> None:
+        active = self.docs / "demo" / "_search_index.json"
+        _ = active.write_text('{"papers":{}}', encoding="utf-8")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--topic",
+                    "demo",
+                    "--query",
+                    "alpha",
+                    "--docs-dir",
+                    str(self.docs),
+                    "--json",
+                ]
+            )
+        self.assertEqual(exit_code, 2)
+        self.assertTrue(stdout.getvalue())
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _ = unittest.main()

@@ -17,18 +17,25 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import os
 import re
 import subprocess
 import sys
 import threading
 from collections.abc import Iterable
+from pathlib import Path
 
 ZERO_RE = re.compile(r"^0+$")
+PINNED_BASELINE = "fc49f2672dcbb4779fa36b31ea5eceb44c090503"
 RAW_PATTERNS = (
-    ("Anthropic/OpenAI", re.compile(rb"sk-(?:ant|proj)-[A-Za-z0-9_-]{20,}")),
+    ("Commercial model key", re.compile(rb"sk-(?:ant|proj)-[A-Za-z0-9_-]{20,}")),
     ("AWS access key", re.compile(rb"AKIA[0-9A-Z]{16}")),
     ("GitHub token", re.compile(rb"gh[pousr]_[A-Za-z0-9]{20,}")),
     ("Google API key", re.compile(rb"AIza[0-9A-Za-z_-]{35}")),
+    ("Zotero API key default", re.compile(
+        rb"(?i)\bZOTERO_API_KEY\b\s*(?:=|:)\s*[\"']?(?!YOUR_ZOTERO_API_KEY_HERE\b)[A-Za-z0-9_-]{24}")),
+    ("Zotero config API key", re.compile(
+        rb"(?is)[\"']zotero[\"']\s*:\s*\{[^}]{0,4096}?[\"']api_key[\"']\s*:\s*[\"']?(?!YOUR_ZOTERO_API_KEY_HERE\b)[A-Za-z0-9_-]{24}")),
 )
 BASE64_TOKEN = re.compile(rb"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/=])")
 WHITESPACE = re.compile(rb"\s+")
@@ -48,6 +55,14 @@ def rev_objects(args: list[str]) -> set[str]:
     return {line.decode("ascii") for line in out.splitlines() if line}
 
 
+def range_objects(object_range: str) -> set[str]:
+    """Return commit, tree, and blob objects introduced by ``base..head``."""
+    base, separator, head = object_range.partition("..")
+    if separator != ".." or not base or not head or ".." in head:
+        raise ValueError("--object-range must be BASE..HEAD")
+    return rev_objects([object_range])
+
+
 def pushed_objects(lines: Iterable[str]) -> set[str]:
     objects: set[str] = set()
     refs_seen = 0
@@ -61,12 +76,12 @@ def pushed_objects(lines: Iterable[str]) -> set[str]:
             continue
         objects.add(local_oid)  # annotated tag object / tip commit itself
         if ZERO_RE.fullmatch(remote_oid):
-            objects.update(rev_objects([local_oid, "--not", "--remotes"]))
+            objects.update(range_objects(f"{PINNED_BASELINE}..{local_oid}"))
         else:
-            objects.update(rev_objects([local_oid, f"^{remote_oid}"]))
+            objects.update(range_objects(f"{remote_oid}..{local_oid}"))
     if refs_seen == 0:
         objects.add(git("rev-parse", "HEAD").decode().strip())
-        objects.update(rev_objects(["HEAD", "--not", "--remotes"]))
+        objects.update(range_objects(f"{PINNED_BASELINE}..HEAD"))
     return objects
 
 
@@ -104,63 +119,104 @@ def findings(data: bytes) -> set[str]:
 def scan_objects(oids: set[str]) -> list[tuple[str, str, set[str]]]:
     if not oids:
         return []
-    proc = subprocess.Popen(
+    with subprocess.Popen(
         ["git", "cat-file", "--batch"], stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdin is not None and proc.stdout is not None
-    ordered = sorted(oids)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+        assert proc.stdin is not None and proc.stdout is not None
+        ordered = sorted(oids)
 
-    # Feed stdin concurrently while consuming stdout. Writing every OID first
-    # can deadlock once cat-file fills its stdout pipe.
-    def feed() -> None:
-        try:
-            proc.stdin.write("".join(f"{oid}\n" for oid in ordered).encode("ascii"))
-            proc.stdin.close()
-        except BrokenPipeError:
-            pass
+        # Feed stdin concurrently while consuming stdout. Writing every OID first
+        # can deadlock once cat-file fills its stdout pipe.
+        def feed() -> None:
+            try:
+                proc.stdin.write("".join(f"{oid}\n" for oid in ordered).encode("ascii"))
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
 
-    writer = threading.Thread(target=feed, daemon=True)
-    writer.start()
+        writer = threading.Thread(target=feed, daemon=True)
+        writer.start()
 
+        hits: list[tuple[str, str, set[str]]] = []
+        for _expected in ordered:
+            header = proc.stdout.readline().decode("ascii", "replace").strip().split()
+            if len(header) < 3 or header[1] == "missing":
+                continue
+            oid, obj_type, size_s = header[:3]
+            size = int(size_s)
+            data = proc.stdout.read(size)
+            proc.stdout.read(1)  # batch separator newline
+            matched = findings(data)
+            if matched:
+                hits.append((oid, obj_type, matched))
+        writer.join()
+        rc = proc.wait()
+        if rc:
+            err = (proc.stderr.read() if proc.stderr else b"").decode("utf-8", "replace")
+            raise RuntimeError(err.strip() or f"git cat-file exited {rc}")
+    return hits
+
+
+def scan_working_tree() -> list[tuple[str, str, set[str]]]:
+    """Scan tracked regular files without following any working-tree symlink."""
+    paths = git("ls-files", "-z").split(b"\0")
     hits: list[tuple[str, str, set[str]]] = []
-    for _expected in ordered:
-        header = proc.stdout.readline().decode("ascii", "replace").strip().split()
-        if len(header) < 3 or header[1] == "missing":
+    for raw_path in paths:
+        if not raw_path:
             continue
-        oid, obj_type, size_s = header[:3]
-        size = int(size_s)
-        data = proc.stdout.read(size)
-        proc.stdout.read(1)  # batch separator newline
+        path = Path(os.fsdecode(raw_path))
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            data = path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(f"cannot scan tracked working-tree file: {exc}") from exc
         matched = findings(data)
         if matched:
-            hits.append((oid, obj_type, matched))
-    writer.join()
-    rc = proc.wait()
-    if rc:
-        err = (proc.stderr.read() if proc.stderr else b"").decode("utf-8", "replace")
-        raise RuntimeError(err.strip() or f"git cat-file exited {rc}")
+            hits.append(("WORKTREE", "file", matched))
     return hits
+
+
+def safe_print(message: str, *, error: bool = False) -> None:
+    """Emit ASCII-safe diagnostics for Windows default-encoding subprocesses."""
+    stream = sys.stderr if error else sys.stdout
+    print(message.encode("ascii", "backslashreplace").decode("ascii"), file=stream)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scan raw pushed git objects for secrets")
     parser.add_argument("--all", action="store_true",
                         help="scan HEAD snapshot and annotated-tag objects")
+    parser.add_argument("--working-tree", action="store_true",
+                        help="scan tracked current working-tree files")
+    parser.add_argument("--object-range", metavar="BASE..HEAD",
+                        help="scan raw objects introduced by BASE..HEAD")
     args = parser.parse_args()
+    if args.all and (args.working_tree or args.object_range):
+        parser.error("--all cannot be combined with selector options")
     try:
-        oids = all_reachable_objects() if args.all else pushed_objects(sys.stdin)
+        selector_used = args.working_tree or args.object_range is not None
+        oids = set()
+        if args.all:
+            oids = all_reachable_objects()
+        elif args.object_range:
+            oids = range_objects(args.object_range)
+        elif not selector_used:
+            oids = pushed_objects(sys.stdin)
         hits = scan_objects(oids)
+        if args.working_tree:
+            hits.extend(scan_working_tree())
     except Exception as exc:
-        print(f"[secret-scan] ERROR: {exc}", file=sys.stderr)
+        safe_print(f"[secret-scan] ERROR: {exc}", error=True)
         return 2  # scanner failures block the push (fail closed)
 
     if hits:
-        print("[secret-scan] credential material found — refusing operation", file=sys.stderr)
+        safe_print("[secret-scan] credential material found - refusing operation", error=True)
         for oid, obj_type, names in hits[:20]:
-            print(f"  {oid[:12]} {obj_type}: {', '.join(sorted(names))}", file=sys.stderr)
-        print("Remove the secret from git history and rotate it before retrying.", file=sys.stderr)
+            safe_print(f"  {oid[:12]} {obj_type}: {', '.join(sorted(names))}", error=True)
+        safe_print("Remove the secret from git history and rotate it before retrying.", error=True)
         return 1
-    print(f"[secret-scan] ✓ scanned {len(oids)} raw git objects; no credentials")
+    safe_print(f"[secret-scan] scanned {len(oids)} raw git objects; no credentials")
     return 0
 
 

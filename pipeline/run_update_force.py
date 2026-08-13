@@ -3,14 +3,14 @@ Paper-Curation --local --update-force 배치 실행 스크립트.
 
 사용법:
   PYTHONUTF8=1 python run_update_force.py --topic ai4s
-  # --concurrency 기본값 16 (Anthropic Tier 4). Tier 1~3 은 4~12 로 낮춤.
+  # --concurrency 기본값 16.
 
 기능:
   1. Zotero 컬렉션에서 전체 논문 fetch
   2. 기존 review.md, text.md, figures/ 삭제
   3. PDF 파싱 → text.md
-  4. Figure 추출 + Gemini Flash 검증 (5라운드, 감쇠)
-  5. review.md 작성 (Claude Haiku)
+  4. Figure 추출 + 결정론적 geometric 검증
+  5. review.md 작성 (saved-auth Codex)
   6. index.html 변환 (review_to_html.py)
   7. 진행 상황을 checkpoint.json에 저장 (중단 후 재개 가능)
 
@@ -24,40 +24,74 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
+from typing import Any, cast
 
-# Paths
-from config_loader import (
-    PAPERS_DIR as _PAPERS_DIR, PIPELINE_DIR, _ssl_ctx,
-    get_zotero_api_key, get_zotero_user_id, get_collection_key, get_collections, get_zotero_dir,
-    get_topic_dir, get_google_key,
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from pipeline.config_loader import (  # noqa: E402
+    PAPERS_DIR as _PAPERS_DIR,
+    PIPELINE_DIR,
+    _ssl_ctx,
+    get_collection_key,
+    get_collections,
+    get_topic_dir,
+    get_zotero_api_key,
+    get_zotero_dir,
+    get_zotero_user_id,
+    load_config,
 )
-from lib.categories import category_slug
+from pipeline.lib.generation_cache import (  # noqa: E402
+    CacheFailure,
+    CacheIdentity,
+    CacheSuccess,
+    GenerationCache,
+    GenerationCacheError,
+)
+from pipeline.lib.run_state import (  # noqa: E402
+    ResumeRequiredError,
+    RunStatus,
+    TopicBusyError,
+)
+from pipeline.geometry_figures import publish_geometry_manifest  # noqa: E402
+from pipeline.providers.codex_gateway import CodexGateway, CodexGatewayError  # noqa: E402
+from pipeline.runtime_policy import (  # noqa: E402
+    RuntimePolicy,
+    RuntimePolicyError,
+    resolve_runtime_policy,
+)
+from pipeline.schemas.codex_schema import (  # noqa: E402
+    JsonObject,
+    SchemaError,
+    validate_json,
+)
+from pipeline.update_geometry_orchestration import (  # noqa: E402
+    Stage,
+    acquire_plan_lease,
+    approved_python,
+    artifact_manifest,
+    build_transitional_sparse_index,
+    default_stage_plan,
+    execute_plan,
+    safe_child_environment,
+)
+from pipeline.release_dry_run import (  # noqa: E402
+    ArtifactValidationError,
+    build_dry_run_plan,
+    build_policy_denied_result,
+    emit as emit_release_result,
+    validate_default_artifacts,
+)
 PAPERS_DIR = str(_PAPERS_DIR)
 PROJECT_ROOT = PIPELINE_DIR.parent
-
-
-def _split_cats_by_image_presence(topic, cats):
-    """Split categories by whether their timeline image exists.
-
-    Returns (cats_with_image, cats_missing_image).
-    Image path: docs/{topic}/category_timeline_{slug}.{png,webp}
-    """
-    topic_dir = get_topic_dir(topic)
-    with_image = []
-    missing = []
-    for cat in cats:
-        slug = category_slug(cat)
-        has_image = any(
-            os.path.exists(os.path.join(str(topic_dir), f"category_timeline_{slug}.{ext}"))
-            for ext in ("png", "webp")
-        )
-        (with_image if has_image else missing).append(cat)
-    return with_image, missing
 
 
 def _topic_default_artifacts_missing(topic):
@@ -75,41 +109,11 @@ def _topic_default_artifacts_missing(topic):
         "_category_summaries.json",
         "_category_narratives.json",
         "_timeline_narrative.json",
-        "research_timeline.png",
     ]
     for name in required:
         path = os.path.join(topic_dir_str, name)
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             missing.append(name)
-
-    expected_categories = []
-    cls_path = os.path.join(topic_dir_str, "_new_classification.json")
-    if os.path.exists(cls_path):
-        try:
-            with open(cls_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for c in data.get("categories", []):
-                name = c.get("name") if isinstance(c, dict) else str(c)
-                if name and name != "Other":
-                    expected_categories.append(name)
-        except Exception:
-            expected_categories = []
-
-    if expected_categories:
-        for cat in expected_categories:
-            slug = category_slug(cat)
-            has_image = any(
-                os.path.exists(os.path.join(topic_dir_str, f"category_timeline_{slug}.{ext}"))
-                and os.path.getsize(os.path.join(topic_dir_str, f"category_timeline_{slug}.{ext}")) > 0
-                for ext in ("png", "webp")
-            )
-            if not has_image:
-                missing.append(f"category_timeline_{slug}.png")
-    elif not os.path.isdir(topic_dir_str) or not any(
-        name.startswith("category_timeline_") and name.endswith((".png", ".webp"))
-        for name in os.listdir(topic_dir_str)
-    ):
-        missing.append("category_timeline_*.png")
 
     return missing
 
@@ -247,19 +251,31 @@ def _resolve_topic_modeling_python():
     )
 
 
-TOPIC_MODELING_PYTHON = _resolve_topic_modeling_python()
-if TOPIC_MODELING_PYTHON != sys.executable:
-    print(f"[env] UMAP/HDBSCAN 단계 인터프리터: {TOPIC_MODELING_PYTHON} "
-          f"(현재 env 가 py312 가 아니거나 프로브 실패 → py312 라우팅; 사유는 _state/env_probe.json)")
-
-ZOTERO_DIR = get_zotero_dir()
-
-API_KEY = get_zotero_api_key()
-USER_ID = get_zotero_user_id()
-COLLECTIONS = get_collections()
+TOPIC_MODELING_PYTHON = sys.executable
+ZOTERO_DIR = ""
+API_KEY = ""
+USER_ID = ""
+COLLECTIONS: dict[str, str] = {}
 
 # Checkpoint
 CHECKPOINT_FILE = str(PIPELINE_DIR / "_update_force_checkpoint.json")
+
+
+def _initialize_runtime(policy: RuntimePolicy) -> RuntimePolicy:
+    """Initialize credentials only after an already-resolved Codex policy."""
+    global API_KEY, COLLECTIONS, TOPIC_MODELING_PYTHON, USER_ID, ZOTERO_DIR
+    TOPIC_MODELING_PYTHON = _resolve_topic_modeling_python()
+    if TOPIC_MODELING_PYTHON != sys.executable:
+        print(
+            f"[env] UMAP/HDBSCAN 단계 인터프리터: {TOPIC_MODELING_PYTHON} "
+            "(현재 env 가 py312 가 아니거나 프로브 실패 → py312 라우팅; "
+            "사유는 _state/env_probe.json)"
+        )
+    ZOTERO_DIR = get_zotero_dir()
+    API_KEY = get_zotero_api_key()
+    USER_ID = get_zotero_user_id()
+    COLLECTIONS = get_collections()
+    return policy
 
 
 def log(msg):
@@ -292,7 +308,7 @@ def save_checkpoint(cp):
     # old complete file rather than a half-written one. _cp_lock still
     # serializes concurrent writers AND the json serialization (callers may
     # append to cp['completed'] from other threads).
-    from lib.atomic_io import atomic_write_json
+    from pipeline.lib.atomic_io import atomic_write_json
     with _cp_lock:
         atomic_write_json(CHECKPOINT_FILE, cp)
 
@@ -397,7 +413,7 @@ def find_pdf(item):
                 continue
             if cd.get("contentType") not in ("application/pdf", ""):
                 continue
-            path = cd.get("path", "")
+            path = cd.get("path", "") or cd.get("filename", "")
             if not path.lower().endswith(".pdf"):
                 continue
             # Zotero "Linked Attachment Base Directory" stores paths as
@@ -411,7 +427,7 @@ def find_pdf(item):
                                    "method": "zotero_children_attachments_uri",
                                    "path": resolved})
                     return resolved, "zotero_children_abs"
-            if os.path.exists(path):
+            if path and os.path.exists(path):
                 _audit_append({"key": key, "title": title[:80],
                                "method": "zotero_children_abs", "path": path})
                 return path, "zotero_children_abs"
@@ -424,11 +440,14 @@ def find_pdf(item):
             # filename and never resolve it. Normalise to forward slashes
             # first so the basename works on either separator.
             fname = path.replace("\\", "/").rsplit("/", 1)[-1]
-            alt = os.path.join(ZOTERO_DIR, fname)
-            if os.path.exists(alt):
-                _audit_append({"key": key, "title": title[:80],
-                               "method": "zotero_children_basename", "path": alt})
-                return alt, "zotero_children_basename"
+            for alt in (
+                os.path.join(ZOTERO_DIR, fname),
+                os.path.join(ZOTERO_DIR, "storage", cd.get("key", ""), fname),
+            ):
+                if os.path.exists(alt):
+                    _audit_append({"key": key, "title": title[:80],
+                                   "method": "zotero_children_basename", "path": alt})
+                    return alt, "zotero_children_basename"
     except Exception as e:
         _audit_append({"key": key, "title": title[:80],
                        "method": "children_api_error", "error": str(e)[:200]})
@@ -670,16 +689,16 @@ def extract_text(pdf_path, slug_dir):
     return False
 
 
-# ── Phase 3: Extract figures + Gemini validation ──
+# ── Phase 3: Extract figures + local geometric validation ──
 
 # Figure crop is LOCALIZED FROM THE PDF'S OWN GEOMETRY before any LLM call.
-# The previous design seeded every crop as the full page and relied on Gemini
-# point-offsets to shrink it; a Gemini failure or an "ok" on round 0 left the
+# The previous design seeded every crop as the full page and relied on a remote
+# validator to shrink it; a validator failure or an "ok" on round 0 left the
 # ENTIRE PAGE as the figure. We now build the crop box from the union of the
 # graphic rects (raster image blocks + get_image_rects + area-filtered
 # get_drawings) that are adjacent to the caption, render THAT box first, and
-# only then optionally let Gemini nudge it within bounds. Gemini can never
-# enlarge the box back to a full page, and a Gemini error keeps the geometric
+# and keeps all later refinement within those bounds. Refinement can never
+# enlarge the box back to a full page, and an unavailable validator keeps the geometric
 # box instead of falsely accepting "ok".
 
 
@@ -769,62 +788,7 @@ def extract_figures(pdf_path, slug_dir):
 
     doc = fitz.open(pdf_path)
     MARGIN = 30
-    MAX_ROUNDS = 2  # geometric box is the prior; Gemini only refines
-
-    # Phase 4 B2: cheap pre-validator runs first. When the heuristic is
-    # confident the figure is invalid (tiny/blank/near-uniform), we skip
-    # the Gemini round trip entirely. Empirically saves ~30% of calls.
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from api.extract import pre_validate_figure
-
-    # 키 해석: env(GOOGLE_API_KEY/GEMINI_API_KEY) → config.json. 단 reextract_figures
-    # 가 geometric-only 강제 시 세팅하는 PAPER_CURATION_NO_GEMINI 가 있으면 키 유무와
-    # 무관하게 Gemini 검증을 끈다 (env pop 만으론 config.json 키가 남아 스위치가 안 먹음).
-    have_gemini = (not os.environ.get("PAPER_CURATION_NO_GEMINI")
-                   and bool(get_google_key().strip()))
-    # Log a degraded-Gemini warning at most once per run instead of silently
-    # accepting full pages when the validator throws.
-    _gemini_warned = {"done": False}
-
-    def validate(img_path, caption):
-        """Return a verdict dict. status ∈ {ok, clipped, oversized, both, error}.
-
-        'error' (validator unavailable) is DISTINCT from 'ok' (figure looks
-        good): the caller keeps the geometric box on 'error' rather than
-        treating it as accepted.
-        """
-        pre = pre_validate_figure(img_path)
-        if pre is not None:
-            return pre
-        if not have_gemini:
-            # No key → skip the round-trip entirely, rely on geometry.
-            return {"status": "error", "adjust_pt": {}}
-        try:
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=get_google_key())
-            with open(img_path, "rb") as f:
-                img_bytes = f.read()
-            prompt = (f"Evaluate cropping of this academic figure.\nCaption: {caption}\n"
-                      f"Check: (1) content CLIPPED at edges? (2) EXCESS body text?\n"
-                      f"JSON only: {{\"status\":\"ok\"|\"clipped\"|\"oversized\"|\"both\","
-                      f"\"issues\":\"brief\",\"adjust_pt\":{{\"top\":0,\"bottom\":0,\"left\":0,\"right\":0}}}}\n"
-                      f"adjust_pt: positive=expand, negative=shrink. PDF points.")
-            resp = client.models.generate_content(
-                model="gemini-3.1-pro-preview",
-                contents=[types.Part.from_bytes(data=img_bytes, mime_type="image/png"), prompt])
-            text = resp.text.strip()
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            return json.loads(text)
-        except Exception as e:
-            if not _gemini_warned["done"]:
-                log(f"  WARN Gemini figure validator unavailable "
-                    f"({type(e).__name__}); using geometric crops only")
-                _gemini_warned["done"] = True
-            return {"status": "error", "adjust_pt": {}}
+    MAX_ROUNDS = 0
 
     # Collect caption candidates across all pages first, so we can dedup a
     # fig_num globally by ADJACENT-GRAPHIC AREA (prefer the real caption over a
@@ -993,8 +957,8 @@ def extract_figures(pdf_path, slug_dir):
 
         # Clamp bounds = the geometric box itself (owned-rect hull + MARGIN,
         # already extended toward the caption to capture text-rendered figure
-        # content). Gemini may nudge WITHIN this box but never expand past it —
-        # the geometric crop is the prior; the LLM only refines inside it, so it
+        # content). Any local refinement stays within this box —
+        # the geometric crop is the prior, so later processing
         # can neither escape to a full page nor re-clip the caption extension.
         hx0, hy0, hx1, hy1 = c["box"]
 
@@ -1021,7 +985,7 @@ def extract_figures(pdf_path, slug_dir):
             if rnd == MAX_ROUNDS:
                 break
 
-            result = validate(out, caption)
+            result: dict[str, Any] = {"status": "error", "adjust_pt": {}}
             status = result.get("status")
             if status == "ok":
                 break
@@ -1066,7 +1030,7 @@ def extract_figures(pdf_path, slug_dir):
         figures.append({"name": str(fig_num), "page": pn, "caption": caption})
 
     # ── 등록 시 '모든 그림' 보장 (채팅 인라인 그림 완전성) ──────────────
-    # (a) 6번 이후 그림: geometric-only 저장 (Gemini 라운드 없음 — 비용 억제).
+    # (a) 6번 이후 그림: geometric-only 저장.
     #     review 반환(figures)에는 넣지 않아 기존 임베드 동작 불변.
     for c in extras:
         out = os.path.join(fig_dir, f"fig{c['fig_num']}.png")
@@ -1136,13 +1100,37 @@ def extract_figures(pdf_path, slug_dir):
             except OSError:
                 pass
 
+    descriptor_by_number = {
+        int(candidate["fig_num"]): candidate
+        for candidate in all_nums
+        if str(candidate.get("fig_num", "")).isdigit()
+    }
+    for orphan in orphan_caps:
+        number = int(orphan.get("fig_num", 0))
+        descriptor_by_number.setdefault(number, orphan)
+    figures = []
+    for number, descriptor in sorted(descriptor_by_number.items()):
+        path = os.path.join(fig_dir, f"fig{number}.png")
+        if _fig_ok(path):
+            figures.append(
+                {
+                    "caption": str(descriptor.get("caption", "")),
+                    "name": str(number),
+                    "page": int(descriptor.get("page", 0)),
+                }
+            )
+
     doc.close()
     return figures
 
 
 # ── Phase 4: Write review.md (Claude Haiku → JSON → Template) ──
 
-REVIEW_TEMPLATE = """# {title}
+REVIEW_TEMPLATE = """---
+schema_version: v1
+---
+
+# {title}
 
 > **저자**: {authors} | **날짜**: {date} | {ref_label}: {ref_link}
 
@@ -1190,60 +1178,27 @@ REVIEW_TEMPLATE = """# {title}
 """
 
 
-REVIEW_TOOL_SCHEMA = {
-    "name": "emit_review",
-    "description": (
-        "Emit the structured Korean review for the given paper. All "
-        "narrative fields must be in Korean except for jargon "
-        "(technical terms, model names, datasets, algorithms, formulas, "
-        "framework/product names) which must stay in the original form."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "essence":         {"type": "string", "minLength": 20,
-                                "description": "핵심 요약 1-2문장."},
-            "fig_essence":     {"type": "integer", "minimum": 0, "maximum": 20,
-                                "description": "Essence에 가장 관련된 Figure 번호. 없으면 0."},
-            "known":           {"type": "string", "minLength": 10,
-                                "description": "알려진 것 1-2문장."},
-            "gap":             {"type": "string", "minLength": 10,
-                                "description": "연구 갭 1-2문장."},
-            "why":             {"type": "string", "minLength": 10,
-                                "description": "왜 중요한지 1-2문장."},
-            "approach":        {"type": "string", "minLength": 10,
-                                "description": "접근법 1-2문장."},
-            "achievement":     {"type": "string", "minLength": 20,
-                                "description": "성과 (마크다운 번호 목록, 각 항목 **굵은 제목**: 설명)."},
-            "fig_achievement": {"type": "integer", "minimum": 0, "maximum": 20},
-            "how":             {"type": "string", "minLength": 10,
-                                "description": "방법론 (마크다운 bullet 목록)."},
-            "fig_how":         {"type": "integer", "minimum": 0, "maximum": 20},
-            "originality":     {"type": "string", "minLength": 10,
-                                "description": "독창성 (마크다운 bullet 목록)."},
-            "limitation":      {"type": "string", "minLength": 10,
-                                "description": "한계 + 후속연구 (마크다운 bullet 목록)."},
-            "novelty":         {"type": "integer", "minimum": 1, "maximum": 5},
-            "technical":       {"type": "integer", "minimum": 1, "maximum": 5,
-                                "description": "Technical soundness."},
-            "significance":    {"type": "integer", "minimum": 1, "maximum": 5},
-            "clarity":         {"type": "integer", "minimum": 1, "maximum": 5},
-            "overall":         {"type": "integer", "minimum": 1, "maximum": 5},
-            "verdict":         {"type": "string", "minLength": 10,
-                                "description": "총평 1-2문장."},
-        },
-        "required": ["essence", "fig_essence", "known", "gap", "why", "approach",
-                     "achievement", "fig_achievement", "how", "fig_how",
-                     "originality", "limitation",
-                     "novelty", "technical", "significance", "clarity", "overall",
-                     "verdict"],
-    },
-}
+REVIEW_SCHEMA_PATH = PIPELINE_DIR / "schemas" / "review-v1.json"
+REVIEW_SCHEMA_VERSION = "review-v1"
+REVIEW_PROMPT_VERSION = "review-prompt-v1"
 
-WRITE_REVIEW_SCHEMA_VERSION = "v1"
-# 기존 review.md 는 재생성하지 않으므로 모델 변경은 신규 리뷰부터 적용된다
-# (캐시 키에 model 포함 — 변경 시 기존 캐시는 자연 무효).
-WRITE_REVIEW_MODEL = os.environ.get("WRITE_REVIEW_MODEL", "claude-sonnet-5")
+
+def _load_review_schema() -> JsonObject:
+    with REVIEW_SCHEMA_PATH.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError("review-v1 schema must be an object")
+    return value
+
+
+REVIEW_SCHEMA: JsonObject | None = None
+
+
+def _review_schema() -> JsonObject:
+    global REVIEW_SCHEMA
+    if REVIEW_SCHEMA is None:
+        REVIEW_SCHEMA = _load_review_schema()
+    return REVIEW_SCHEMA
 
 
 _REVIEW_STR_TAGS = ("essence", "known", "gap", "why", "approach", "achievement",
@@ -1322,13 +1277,68 @@ def _salvage_review_data(data):
     return fixed
 
 
-def write_review(item, slug_dir, figures):
+class ReviewValidationError(ValueError):
+    """A structured review violated deterministic host-side invariants."""
+
+
+def _validate_review_data(data: JsonObject) -> JsonObject:
+    schema = _review_schema()
+    validate_json(data, schema)
+    required = schema.get("required")
+    if not isinstance(required, list) or set(data) != set(required):
+        raise ReviewValidationError("review fields must exactly match review-v1")
+    for name in _REVIEW_STR_TAGS:
+        value = data.get(name)
+        if not isinstance(value, str) or re.search(r"[가-힣]", value) is None:
+            raise ReviewValidationError(f"{name} must contain Korean narrative")
+        if re.search(r"</?(?:parameter|invoke|[a-z_]+)>", value, re.I):
+            raise ReviewValidationError(f"{name} contains leaked tool tags")
+        if re.search(r"(?m)^##\s+", value):
+            raise ReviewValidationError(f"{name} contains a top-level heading")
+    for name in ("fig_essence", "fig_achievement", "fig_how"):
+        value = data.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 20:
+            raise ReviewValidationError(f"{name} must be an integer from 0 to 20")
+    for name in ("novelty", "technical", "significance", "clarity", "overall"):
+        value = data.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5:
+            raise ReviewValidationError(f"{name} must be an integer from 1 to 5")
+    return data
+
+
+def _atomic_publish_review(path: Path, content: str) -> None:
+    descriptor, raw_temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            _ = handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_review(
+    item,
+    slug_dir,
+    figures,
+    *,
+    runtime_policy: RuntimePolicy | None = None,
+    gateway: Any | None = None,
+    cache: GenerationCache | None = None,
+    identity: CacheIdentity | None = None,
+):
     text_path = os.path.join(slug_dir, "text.md")
     if not os.path.exists(text_path):
         return False
 
-    with open(text_path, "r", encoding="utf-8") as f:
-        paper_text = f.read()[:15000]
+    source_bytes = Path(text_path).read_bytes()
+    paper_text = source_bytes.decode("utf-8")[:15000]
 
     title = item.get("title", "")
     authors = ", ".join(
@@ -1344,15 +1354,8 @@ def write_review(item, slug_dir, figures):
         fig_refs += f"\n- Fig {fig['name']}: {fig['caption'][:80]}"
 
     try:
-        from anthropic import Anthropic
-        client = Anthropic(timeout=180.0, max_retries=4)
-
-        # Tool-use forces a structured JSON response that matches
-        # REVIEW_TOOL_SCHEMA. The SDK auto-retries on schema validation
-        # failures so we no longer need post-hoc list-literal / figure
-        # path / evaluation fixers.
         prompt = (
-            "논문을 분석하고 `emit_review` 도구를 호출해 리뷰 필드를 채워라.\n\n"
+            "논문을 분석하고 제공된 JSON Schema와 정확히 일치하는 JSON 리뷰를 반환하라.\n\n"
             "모든 narrative 필드는 한국어 서술. 단 Jargon — 기술 용어·모델명·데이터셋·"
             "알고리즘·수식·프레임워크·제품명 등 — 은 원문 그대로 유지하고 번역하지 "
             "말 것. 예: \"diffusion model을 사용한다\" (O), "
@@ -1362,35 +1365,44 @@ def write_review(item, slug_dir, figures):
             f"본문 (발췌): {paper_text[:12000]}\n"
             f"Figure 목록:{fig_refs}\n"
         )
-
-        # cached_call: same (slug + prompt + model + schema_version) → cache
-        # hit, no Anthropic call. Re-runs of --mode rebuild on unchanged
-        # papers cost zero LLM calls.
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from api._llm import cached_call, paper_cache_dir
         slug = os.path.basename(slug_dir.rstrip("/\\"))
-        cache_dir = paper_cache_dir(slug)
-
-        def _make_call():
-            response = client.messages.create(
-                model=WRITE_REVIEW_MODEL,
-                max_tokens=4000,
-                tools=[REVIEW_TOOL_SCHEMA],
-                tool_choice={"type": "tool", "name": "emit_review"},
-                messages=[{"role": "user", "content": prompt}],
+        if identity is None:
+            policy = runtime_policy or resolve_runtime_policy(
+                cast(JsonObject, load_config())
             )
-            for block in response.content:
-                # SDK returns ToolUseBlock; check by attribute presence.
-                if getattr(block, "type", None) == "tool_use" \
-                        and getattr(block, "name", None) == "emit_review":
-                    return dict(block.input)
-            raise RuntimeError("emit_review tool was not invoked")
+            if policy.mode != "codex":
+                raise GenerationCacheError("policy-denied", "review generation requires codex mode")
+            if gateway is None:
+                gateway = CodexGateway.production(PROJECT_ROOT)
+            identity = CacheIdentity.from_gateway(
+                runtime_policy=policy,
+                gateway=gateway,
+                role="long_form",
+                prompt_version=REVIEW_PROMPT_VERSION,
+                prompt=prompt,
+                schema_version=REVIEW_SCHEMA_VERSION,
+                schema=_review_schema(),
+                source=source_bytes,
+                task_id=f"review:{slug}",
+            )
+        if gateway is None:
+            gateway = CodexGateway.production(PROJECT_ROOT)
+        generation_cache = cache or GenerationCache(Path(slug_dir) / ".llm_cache")
 
-        data = cached_call(
-            cache_dir, prompt, WRITE_REVIEW_MODEL, _make_call,
-            schema_version=WRITE_REVIEW_SCHEMA_VERSION,
+        def _generate():
+            try:
+                result = gateway.generate_json(
+                    "long_form",
+                    prompt,
+                    _review_schema(),
+                )
+                return CacheSuccess(_validate_review_data(result))
+            except (CodexGatewayError, ReviewValidationError, SchemaError, TypeError, ValueError):
+                return CacheFailure("failed")
+
+        data = _validate_review_data(
+            generation_cache.get_or_generate(identity, _generate)
         )
-        data = _salvage_review_data(data)
 
         # Build figure insertions
         def fig_block(fig_num_str):
@@ -1443,9 +1455,8 @@ def write_review(item, slug_dir, figures):
             verdict=data.get("verdict", ""),
         )
 
-        review_path = os.path.join(slug_dir, "review.md")
-        with open(review_path, "w", encoding="utf-8") as f:
-            f.write(review_text.strip() + "\n")
+        review_path = Path(slug_dir) / "review.md"
+        _atomic_publish_review(review_path, review_text.strip() + "\n")
         return True
 
     except Exception as e:
@@ -1756,7 +1767,7 @@ def paper_has_other_topics(slug):
 MAX_RETRIES = 3
 
 
-def _do_process(item, slug, slug_dir, pdf_path):
+def _do_process(item, slug, slug_dir, pdf_path, runtime_policy=None):
     """Single attempt: text.md → figures → review.md → index.html.
     Returns (status, reason) — status is 'ok' or 'fail'."""
 
@@ -1775,12 +1786,26 @@ def _do_process(item, slug, slug_dir, pdf_path):
 
     # Extract figures
     log(f"  {slug}: extracting figures...")
-    figures = extract_figures(pdf_path, slug_dir)
+    try:
+        figures = extract_figures(pdf_path, slug_dir)
+    except Exception as error:
+        log(f"  {slug}: geometry extraction failed ({type(error).__name__})")
+        figures = []
+    if os.path.isfile(pdf_path):
+        _ = publish_geometry_manifest(pdf_path, slug_dir, figures)
+    else:
+        log(f"  {slug}: geometry manifest skipped (source PDF missing)")
     log(f"  {slug}: {len(figures)} figures extracted")
 
     # Write review
     log(f"  {slug}: writing review...")
-    write_review(item, slug_dir, figures)
+    if not write_review(
+        item,
+        slug_dir,
+        figures,
+        runtime_policy=runtime_policy,
+    ):
+        return "fail", "review_write_failed"
     review_path = os.path.join(slug_dir, "review.md")
     if not os.path.exists(review_path) or os.path.getsize(review_path) < 200:
         return "fail", "review_write_failed"
@@ -1799,7 +1824,7 @@ def _do_process(item, slug, slug_dir, pdf_path):
     return "ok", ""
 
 
-def process_paper(item, slug, cp):
+def process_paper(item, slug, cp, runtime_policy=None):
     """Process a single paper with up to MAX_RETRIES auto-retries on failure."""
     if slug in cp["completed"]:
         return "skipped"
@@ -1811,7 +1836,7 @@ def process_paper(item, slug, cp):
     if paper_has_other_topics(slug):
         log(f"  {slug}: belongs to multiple topics, skipping file deletion")
     else:
-        for fname in ["review.md", "index.html", "text.md"]:
+        for fname in ["text.md"]:
             fpath = os.path.join(slug_dir, fname)
             if os.path.exists(fpath):
                 os.remove(fpath)
@@ -1838,7 +1863,13 @@ def process_paper(item, slug, cp):
     # Try up to MAX_RETRIES times
     last_reason = ""
     for attempt in range(1, MAX_RETRIES + 1):
-        status, reason = _do_process(item, slug, slug_dir, pdf_path)
+        status, reason = _do_process(
+            item,
+            slug,
+            slug_dir,
+            pdf_path,
+            runtime_policy,
+        )
         if status == "ok":
             with _cp_lock:
                 cp["completed"].append(slug)
@@ -1942,16 +1973,25 @@ def _run_curate(topic, *, mode=None, concurrency=16, resume=False,
         sys.argv = argv_backup
 
 
-def main():
+def _positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Paper-curation --update-force batch")
     parser.add_argument("--topic", default="ai4s", help="Topic: ai4s or scisci")
-    parser.add_argument("--concurrency", type=int, default=16, help="Parallel workers (Tier 4 default; lower for Tier 1~3 — see README)")
+    parser.add_argument("--llm-mode", default=None)
+    parser.add_argument("--concurrency", type=_positive_integer, default=1,
+                        help="Serialized Codex worker count (safe profile requires 1)")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--skip-existing", action="store_true",
                         help="Skip papers that already have review.md (for --update mode)")
     parser.add_argument("--limit", type=int, default=0, help="Limit papers (0=all)")
     parser.add_argument("--timeline", action="store_true",
-                        help="Regenerate timeline images (with --resume: changed cats only, alone: all cats)")
+                        help="Regenerate text timelines (with --resume: changed categories only)")
     parser.add_argument("--ensure-timeline", action="store_true",
                         help="기본 narrative/timeline 산출물이 없으면 생성하고, 업데이트 중 바뀐 카테고리만 보강한다.")
     parser.add_argument("--category", action="store_true",
@@ -1974,10 +2014,11 @@ def main():
     parser.add_argument("--insights", action="store_true",
                         help="extract_insights 에서 cross-category insights(Option)까지 재생성. "
                              "기본은 paper connections(Core, '같이 보면 좋은 논문')만 생성 (--only connections).")
-    parser.add_argument("--local-fallback", action="store_true",
-                        help="topic_modeling 연결 단계에서 max retry round 를 다 돌고도 막힌 "
-                             "papers 를 로컬 OpenAI 호환 모델(Ollama/LM Studio 등)로 마저 연결. "
-                             "config.json 의 local_model 또는 LOCAL_MODEL_BASE_URL/NAME 필요.")
+    parser.add_argument(
+        "--local-fallback",
+        action="store_true",
+        help="Deprecated compatibility flag; no alternative model is invoked.",
+    )
     parser.add_argument("--no-deploy", action="store_true",
                         help="end-of-run prepare_deploy(wrangler deploy + gh-pages + master push)를 건너뛴다. "
                              "무인 자동복구(auto_recover --execute)처럼 배포를 원치 않는 경우용. "
@@ -1992,16 +2033,98 @@ def main():
     # flags that were also specified. Omitting --mode keeps 100% legacy
     # behavior, so existing callers (incl. in-flight batches) are unaffected.
     parser.add_argument("--mode", choices=["curate", "rebuild", "reclassify", "retime"],
-                        default=None,
+                        default="curate",
                         help="New MECE mode selector. curate=new papers only (keeps existing reviews); "
                              "rebuild=regenerate all reviews; reclassify=re-run topic modeling on existing reviews; "
                              "retime=regenerate timeline narratives+images only. "
                              "When set, overrides --resume/--skip-existing/--timeline/--category combinations.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--state-dir",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    args = parser.parse_args(argv)
+    # The release dry-run boundary is deliberately before policy/config,
+    # interpreter probes, credentials, Zotero, checkpoints, leases, or writes.
+    if args.dry_run:
+        emit_release_result(
+            build_dry_run_plan(
+                entrypoint="pipeline/run_update_force.py",
+                topic=args.topic,
+                mode=args.mode,
+                concurrency=args.concurrency,
+                policy_mode=args.llm_mode or "codex",
+            )
+        )
+        return 0
+
+    try:
+        preview_config: JsonObject = (
+            {
+                "runtime": {
+                    "allow_paid_api": False,
+                    "llm_mode": args.llm_mode,
+                },
+                "schema_version": 2,
+            }
+            if args.llm_mode is not None
+            else cast(JsonObject, load_config())
+        )
+        preview_policy = resolve_runtime_policy(
+            preview_config,
+            args.llm_mode,
+        )
+    except RuntimePolicyError as error:
+        print(f"Runtime policy denied: {error.code}", file=sys.stderr)
+        return 2
+    if preview_policy.mode == "off":
+        emit_release_result(
+            build_policy_denied_result(
+                args.topic,
+                Path(PAPERS_DIR).parent,
+            )
+        )
+        return 3
+    _apply_mode_mapping(args)
+    runtime_policy = preview_policy
+    safe_state_root = (
+        args.state_dir.resolve()
+        if args.state_dir is not None
+        else PIPELINE_DIR / "_safe_update_state"
+    )
+    active_run = safe_state_root / "topics" / f"{args.topic}.active.json"
+    resuming_safe_run = bool(args.resume and active_run.is_file())
+    try:
+        safe_run_lease = acquire_plan_lease(
+            args.topic,
+            preview_policy,
+            state_root=safe_state_root,
+            workspace_root=PROJECT_ROOT,
+            resume=resuming_safe_run,
+        )
+    except (TopicBusyError, ResumeRequiredError) as error:
+        log(f"SAFE RUN OWNERSHIP DENIED: {error.code}")
+        return 75
+    except Exception as error:
+        log(f"SAFE RUN OWNERSHIP DENIED: {type(error).__name__}")
+        return 2
+
+    def close_safe_run(status: RunStatus) -> None:
+        if not safe_run_lease.finished:
+            safe_run_lease.finish(status)
+        safe_run_lease.release()
+
+    try:
+        runtime_policy = _initialize_runtime(preview_policy)
+        approved_python_path = approved_python()
+    except Exception as error:
+        log(f"SAFE RUN INITIALIZATION FAILED: {type(error).__name__}")
+        close_safe_run(RunStatus.FAILED)
+        return 2
 
     # Apply --mode → legacy flags mapping. Pure translation; no behavior change
     # when --mode is absent (args.mode is None → all legacy flags honored as-is).
-    _apply_mode_mapping(args)
 
     # --conn-full → force full connection regen for child subprocesses
     # (extract_insights / topic_modeling). They read CONN_FULL_REBUILD from env,
@@ -2051,7 +2174,8 @@ def main():
     collection_key = COLLECTIONS.get(args.topic, "")
     if not collection_key:
         print(f"Unknown topic: {args.topic}")
-        return
+        close_safe_run(RunStatus.FAILED)
+        return 2
 
     # Load checkpoint
     if args.resume:
@@ -2070,7 +2194,8 @@ def main():
     items = fetch_zotero_items(collection_key)
     log(f"Total papers: {len(items)}")
 
-    # Get existing slugs
+    # Get existing slugs (create papers root on first run)
+    os.makedirs(PAPERS_DIR, exist_ok=True)
     existing_slugs = sorted(d for d in os.listdir(PAPERS_DIR)
                             if os.path.isdir(os.path.join(PAPERS_DIR, d)) and d[0].isdigit())
 
@@ -2110,14 +2235,6 @@ def main():
         print(f"[rebuild-preview] proceed if these look correct. "
               f"Ctrl-C now to abort.\n")
 
-    if args.dry_run:
-        print(f"[dry-run] would process {len(item_slug_pairs)} papers:")
-        for _, slug in item_slug_pairs[:50]:
-            print(f"  {slug}")
-        if len(item_slug_pairs) > 50:
-            print(f"  ... +{len(item_slug_pairs) - 50} more")
-        return
-
     # Skip papers with existing review.md (--skip-existing or --resume).
     # When --slugs is used the listed papers must be force-rebuilt, so they
     # are intentionally excluded from this "already done" shortcut.
@@ -2154,6 +2271,14 @@ def main():
         except Exception as _e:
             log(f"[pdf-change] check skipped: {_e}")
 
+    if forced_slugs:
+        cp["completed"] = [
+            slug
+            for slug in cp.get("completed", [])
+            if slug not in forced_slugs
+        ]
+        save_checkpoint(cp)
+
     if args.skip_existing or args.resume:
         skipped = 0
         for item, slug in item_slug_pairs:
@@ -2178,14 +2303,20 @@ def main():
     log(f"Concurrency: {args.concurrency}")
     log(f"Estimated time: ~{len(remaining) * 5 / args.concurrency / 60:.1f} hours")
 
-    # Process with thread pool
+    # Process with thread pool while the topic lease is already held.
     start_time = time.time()
     done = 0
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
         futures = {}
         for item, slug in remaining:
-            future = executor.submit(process_paper, item, slug, cp)
+            future = executor.submit(
+                process_paper,
+                item,
+                slug,
+                cp,
+                runtime_policy,
+            )
             futures[future] = slug
 
         for future in as_completed(futures):
@@ -2216,7 +2347,7 @@ def main():
     # build_papers_index will preserve `zotero_item_key` and `pdf_path` via prev.get(...).
     if _slug_to_zotero_key or _slug_to_pdf_path:
         try:
-            from lib.atomic_io import atomic_write_json
+            from pipeline.lib.atomic_io import atomic_write_json
             idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
             if os.path.exists(idx_path):
                 with open(idx_path, "r", encoding="utf-8") as f:
@@ -2242,476 +2373,177 @@ def main():
     # ── Post-processing: rebuild index, classify, insights, topic page ──
     topic = args.topic
     newly_completed = {slug for _item, slug in remaining if slug in cp.get("completed", [])}
-    do_timeline_images = args.timeline or args.category  # --category auto-enables timeline
+    do_timeline_text = args.timeline or args.category
     do_ensure_timeline = getattr(args, "ensure_timeline", False)
     missing_default_artifacts = (
         _topic_default_artifacts_missing(topic)
-        if (do_ensure_timeline or do_timeline_images)
+        if (do_ensure_timeline or do_timeline_text)
         else []
     )
-    needs_postprocess = (
+    base_needs_postprocess = (
         bool(newly_completed)
         or (len(cp["completed"]) > 0 and not args.resume)
         or bool(args.timeline)
         or bool(args.category)
         or bool(missing_default_artifacts)
     )
+    needs_postprocess = base_needs_postprocess or resuming_safe_run
     if not needs_postprocess:
         log("\nPost-processing skipped: no new papers, no explicit reclassify/retime, "
             "and default timeline artifacts already exist.")
     if needs_postprocess:
         log("\n" + "=" * 60)
-        log("POST-PROCESSING: index → classify → summaries → insights → HTML → topic index")
+        log("SAFE POST-PROCESSING: retained local stages")
         log("=" * 60)
 
-        is_update = args.resume  # --resume implies update mode
-        do_reclassify = args.category  # --category forces topic_modeling
+        all_slugs = sorted(set(cp.get("completed", [])))
+        validated_review_slugs = [
+            slug
+            for slug in all_slugs
+            if (
+                (Path(PAPERS_DIR) / slug / "review.md").is_file()
+                and (
+                    Path(PAPERS_DIR)
+                    / slug
+                    / "figures"
+                    / "manifest-v1.json"
+                ).is_file()
+            )
+        ]
+        planned = default_stage_plan(
+            topic,
+            runtime_policy,
+            executable=approved_python_path,
+            paper_slugs=all_slugs,
+        )
+        runnable = []
+        for stage in planned:
+            if stage.name in {"review", "geometry"}:
+                if not validated_review_slugs:
+                    continue
+                if stage.name == "review":
+                    outputs = tuple(
+                        f"docs/papers/{slug}/review.md"
+                        for slug in validated_review_slugs
+                    )
+                    names = tuple("review" for _ in outputs)
+                else:
+                    outputs = tuple(
+                        f"docs/papers/{slug}/figures/manifest-v1.json"
+                        for slug in validated_review_slugs
+                    )
+                    names = tuple("geometry" for _ in outputs)
+                runnable.append(Stage(stage.name, (), outputs, names))
+                continue
+            runnable.append(stage)
 
-        # extract_insights 는 paper connections(Core — '같이 보면 좋은 논문' 박스)만
-        # 기본 생성한다. cross-category insights 는 Option 이라 --insights 가 명시될
-        # 때만 둘 다(--only all) 돌린다. 미생성 시 _insights.json 은 stale/absent 로
-        # 남고 build_topic_index 가 부재를 허용한다.
-        insights_only_arg = ["--only", "all" if args.insights else "connections"]
-
-
-        # Steps in this set MUST succeed — any non-zero exit, timeout, or
-        # unexpected exception aborts the whole orchestration. Soft-failing
-        # them would leave the topic with stale classifications (so new
-        # papers vanish from the index) or stale per-category text (so
-        # downstream renders mis-attribute work to wrong categories).
-        # Anything not in this set may degrade gracefully (LLM narrative,
-        # image generation, search index).
-        CRITICAL_STEPS = {
-            "build_papers_index",
-            "topic_modeling",
-            "topic_modeling (coords+connections)",
-            "topic_modeling (umap fix)",
-            "classify_papers",
-            "build_search_index",
-            "build_cross_index",
-            "evaluate_retrieval",
-            "evaluate_retrieval (_cross)",
-            "refresh_retrieval_eval_snapshot",
+        timeouts = {
+            "classification": 3600,
+            "summary": 1200,
+            "connection": 14400,
+            "timeline": 21600,
         }
 
-        def run_step(step_name, cmd, step_timeout=600):
-            log(f"  [{step_name}] ...")
-            is_critical = step_name in CRITICAL_STEPS
-            try:
-                result = subprocess.run(
-                    cmd, cwd=str(PIPELINE_DIR.parent),
-                    capture_output=True, text=True, timeout=step_timeout,
-                    env={**os.environ, "PYTHONUTF8": "1"},
-                )
-                if result.returncode != 0:
-                    severity = "ABORT" if is_critical else "FAILED"
-                    log(f"  [{step_name}] {severity} (exit {result.returncode})")
-                    # Dump full stderr + stdout to disk so the real traceback
-                    # (often >200 chars) survives for diagnosis.
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    safe_step = re.sub(r'[^A-Za-z0-9_-]+', '_', step_name)[:50]
-                    dump_path = PIPELINE_DIR / "_logs" / f"step_failure_{safe_step}_{ts}.log"
-                    try:
-                        dump_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(dump_path, "w", encoding="utf-8") as f:
-                            f.write(f"=== command ===\n")
-                            f.write(" ".join(str(c) for c in cmd) + "\n")
-                            f.write(f"\n=== exit code: {result.returncode} ===\n")
-                            f.write(f"\n=== STDERR ({len(result.stderr or '')} chars) ===\n")
-                            f.write(result.stderr or "(empty)\n")
-                            f.write(f"\n=== STDOUT ({len(result.stdout or '')} chars) ===\n")
-                            f.write(result.stdout or "(empty)\n")
-                        log(f"    [diag] full output dumped: {dump_path}")
-                    except Exception as _dump_e:
-                        log(f"    [diag] dump failed: {_dump_e}")
-                    # Console: last 30 lines of stderr (not first 200 chars) —
-                    # tracebacks are most useful at the tail.
-                    if result.stderr:
-                        last = result.stderr.rstrip().splitlines()[-30:]
-                        for ln in last:
-                            log(f"    {ln}")
-                    if is_critical:
+        def run_safe_stage(stage):
+            if not stage.argv:
+                if resuming_safe_run and stage.name in {"review", "geometry"}:
+                    missing = [
+                        output
+                        for output in stage.outputs
+                        if not (Path(PROJECT_ROOT) / output).is_file()
+                    ]
+                    if missing:
                         raise RuntimeError(
-                            f"critical step '{step_name}' failed "
-                            f"(exit {result.returncode}); aborting orchestration. "
-                            f"See {dump_path} for full output."
+                            f"in-process artifact changed before resume: "
+                            f"{stage.name} (missing {missing[0]})"
                         )
-                else:
-                    out_lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
-                    if out_lines:
-                        log(f"  [{step_name}] OK: {out_lines[-1][:100]}")
-                    else:
-                        log(f"  [{step_name}] OK")
-            except subprocess.TimeoutExpired:
-                log(f"  [{step_name}] TIMEOUT ({step_timeout}s)")
-                if is_critical:
-                    raise RuntimeError(
-                        f"critical step '{step_name}' timed out "
-                        f"after {step_timeout}s; aborting orchestration."
-                    )
-            except RuntimeError:
-                raise  # critical-step abort: re-raise as-is
-            except Exception as e:
-                log(f"  [{step_name}] ERROR: {str(e)[:100]}")
-                if is_critical:
-                    raise RuntimeError(
-                        f"critical step '{step_name}' raised {type(e).__name__}; "
-                        "aborting orchestration."
-                    ) from e
-
-        # Step 1: Always rebuild index
-        run_step("build_papers_index",
-                 ["python", "pipeline/build_papers_index.py", "--topic", topic])
-
-        # Step 1.5: 피인용수·레퍼런스 (citations.md / references.md)
-        #
-        # build_papers_index 직후에 둔다 — `_papers_index.json` 이 방금 갱신돼
-        # 대상 목록이 정확하고, run_metrics 가 되쓰는 피인용수 캐시를 이후
-        # 단계(classify / build_topic_index / build_search_index)가 그대로
-        # 읽을 수 있다.
-        #
-        # 기본이 30일 증분이라 매 사이클 돌려도 비용이 거의 없다. 새로 리뷰된
-        # 논문은 citations.md 가 없으므로 항상 대상에 들어간다.
-        #
-        # **soft step 이다** — 외부 API(Crossref/OpenAlex/Scopus) 장애나 망
-        # 문제로 지표를 못 받는 것이 리뷰 파이프라인 전체를 중단시켜서는 안 된다.
-        # CRITICAL_STEPS 에 넣지 않은 이유다.
-        if not getattr(args, "skip_metrics", False):
-            run_step("run_metrics",
-                     ["python", "pipeline/run_metrics.py", "--quiet"],
-                     step_timeout=5400)
-
-        # Step 2: topic_modeling
-        # --category: always run (reclassify all)
-        # --resume without --category: skip (keep existing categories)
-        # full mode: always run
-        # opt-in: connection 단계가 끝까지 막히면 로컬 모델로 마저 연결 (--local-fallback)
-        tm_local = ["--local-fallback"] if getattr(args, "local_fallback", False) else []
-        old_cats_by_slug = {}
-        if do_reclassify:
-            # Snapshot current classifications before reclassification
-            try:
-                idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-                with open(idx_path, "r", encoding="utf-8") as f:
-                    idx = json.load(f)
-                for p in idx:
-                    cls = p.get("classifications", {}).get(topic, {})
-                    old_cats_by_slug[p["slug"]] = set(cls.get("all_categories", []))
-            except Exception:
-                pass
-            run_step("topic_modeling",
-                     [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic] + tm_local, 3600)
-        elif is_update:
-            # Update mode normally runs --skip-classification (refresh coords +
-            # connections only, reuse the existing HDBSCAN bundle). But
-            # classify_papers.py hard-exits if `_hdbscan_model.joblib` is
-            # absent. On a topic that never had a full (non-skip) run the bundle
-            # doesn't exist yet, so a missing bundle must trigger a one-time
-            # FULL topic_modeling (no --skip-classification) to build it,
-            # rather than aborting the whole pipeline at a critical step.
-            bundle_path = os.path.join(str(get_topic_dir(topic)), "_hdbscan_model.joblib")
-            if not os.path.exists(bundle_path):
-                log("  [topic_modeling] HDBSCAN bundle missing — running full "
-                    "topic_modeling to build it (first run for this topic)")
-                run_step("topic_modeling",
-                         [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic] + tm_local, 3600)
-            else:
-                run_step("topic_modeling (coords+connections)",
-                         [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic, "--skip-classification"] + tm_local, 3600)
-        else:
-            run_step("topic_modeling",
-                     [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic] + tm_local, 3600)
-
-        # Step 3: classify (always — new papers only in update mode without --category)
-        run_step("classify_papers",
-                 [TOPIC_MODELING_PYTHON, "pipeline/classify_papers.py", "--topic", topic], 600)
-
-        # Step 4: Determine changed categories
-        changed_cats = []
-        if do_reclassify:
-            # Compare before/after classifications to find changed categories
-            try:
-                idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-                with open(idx_path, "r", encoding="utf-8") as f:
-                    idx = json.load(f)
-                cat_set = set()
-                for p in idx:
-                    if topic not in p.get("topics", []):
-                        continue
-                    slug = p["slug"]
-                    cls = p.get("classifications", {}).get(topic, {})
-                    new_cats = set(cls.get("all_categories", []))
-                    old_cats = old_cats_by_slug.get(slug, set())
-                    # Categories that gained or lost this paper
-                    diff = new_cats.symmetric_difference(old_cats)
-                    cat_set.update(diff)
-                    cat_set.update(new_cats)  # also include current cats of moved papers
-                changed_cats = sorted(cat_set) if cat_set else []
-                if changed_cats:
-                    log(f"  [changed_categories] {len(changed_cats)} categories changed after reclassification")
-                    for c in changed_cats:
-                        log(f"    - {c}")
-                else:
-                    log("  [changed_categories] No category changes detected — full regeneration")
-            except Exception as e:
-                log(f"  [changed_categories] ERROR comparing: {e} — full regeneration")
-                changed_cats = []
-        elif is_update and newly_completed:
-            try:
-                idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-                with open(idx_path, "r", encoding="utf-8") as f:
-                    idx = json.load(f)
-                cat_set = set()
-                for p in idx:
-                    if p.get("slug") in newly_completed:
-                        cls = p.get("classifications", {}).get(topic, {})
-                        for c in cls.get("all_categories", []):
-                            cat_set.add(c)
-                        pc = cls.get("primary_category", "")
-                        if pc:
-                            cat_set.add(pc)
-                changed_cats = sorted(cat_set)
-                log(f"  [changed_categories] {len(changed_cats)} categories affected by {len(newly_completed)} new papers")
-                for c in changed_cats:
-                    log(f"    - {c}")
-            except Exception as e:
-                log(f"  [changed_categories] ERROR reading index: {e}")
-                changed_cats = []
-
-        if missing_default_artifacts:
-            log("  [default_outputs] missing narrative/timeline artifacts — will ensure:")
-            for name in missing_default_artifacts[:12]:
-                log(f"    - {name}")
-            if len(missing_default_artifacts) > 12:
-                log(f"    ... +{len(missing_default_artifacts) - 12} more")
-
-        def run_default_topic_outputs(reason):
-            log(f"  [default_outputs] full narrative/timeline generation ({reason})")
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic], 21600)
-        # Step 5-6: summaries, insights, timelines — scoped by changed categories
-        if do_reclassify and changed_cats and missing_default_artifacts:
-            # If default outputs are absent, scoped timeline regeneration would
-            # still leave the main narrative/timeline incomplete. Build all.
-            run_default_topic_outputs("missing default outputs")
-        elif do_reclassify and changed_cats:
-            # --category: full reclassification → rebuild ALL summaries/insights (old cats must be purged)
-            # Only timelines are scoped to changed categories
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            cats_arg = ["--categories"] + changed_cats
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic] + cats_arg, 21600)
-        elif do_reclassify:
-            # --category but no diff detected: full regeneration
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic], 21600)
-        elif is_update:
-            if missing_default_artifacts and (do_ensure_timeline or do_timeline_images):
-                run_default_topic_outputs("missing default outputs")
-            elif changed_cats:
-                cats_arg = ["--categories"] + changed_cats
-                run_step("build_category_summaries",
-                         ["python", "pipeline/build_category_summaries.py", "--topic", topic] + cats_arg, 1200)
-                run_step("extract_insights",
-                         ["python", "pipeline/extract_insights.py", "--topic", topic] + cats_arg + insights_only_arg, 14400)
-
-                # Split by image presence:
-                #   - cats_with_image: narrative-only (unless --timeline explicitly requested)
-                #   - cats_missing_image: always full generation (new/renamed categories MUST get images)
-                cats_with_image, cats_missing_image = _split_cats_by_image_presence(topic, changed_cats)
-                if cats_missing_image:
-                    log(f"  [generate_timelines] {len(cats_missing_image)} categories missing timeline image — will generate:")
-                    for c in cats_missing_image:
-                        log(f"    - {c}")
-                if do_timeline_images:
-                    # --timeline: full generation for all changed cats
-                    run_step("generate_timelines",
-                             ["python", "pipeline/generate_timelines.py", "--topic", topic] + cats_arg, 21600)
-                else:
-                    # Auto: narrative-only for cats with existing images
-                    if cats_with_image:
-                        run_step("generate_timelines (narrative)",
-                                 ["python", "pipeline/generate_timelines.py", "--topic", topic,
-                                  "--categories"] + cats_with_image + ["--narrative-only"], 21600)
-                    # Auto: full generation for new/renamed cats without images
-                    if cats_missing_image:
-                        run_step("generate_timelines (images)",
-                                 ["python", "pipeline/generate_timelines.py", "--topic", topic,
-                                  "--categories"] + cats_missing_image, 21600)
-            elif do_timeline_images:
-                run_default_topic_outputs("--timeline requested")
-            else:
-                log("  [summaries/insights/timelines] SKIP (no new papers classified)")
-        elif do_timeline_images:
-            # --timeline alone (no --resume): full regeneration of all narratives + images
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic], 21600)
-        else:
-            # Full mode (no --resume, no --timeline)
-            run_step("build_category_summaries",
-                     ["python", "pipeline/build_category_summaries.py", "--topic", topic], 1200)
-            run_step("extract_insights",
-                     ["python", "pipeline/extract_insights.py", "--topic", topic] + insights_only_arg, 14400)
-            run_step("generate_timelines",
-                     ["python", "pipeline/generate_timelines.py", "--topic", topic], 21600)
-
-        # Step 7-10: Always run (fast steps)
-        run_step("inject_frontmatter",
-                 ["python", "pipeline/inject_frontmatter.py", "--topic", topic], 600)
-        run_step("generate_moc",
-                 ["python", "pipeline/generate_moc.py", "--topic", topic], 600)
-        # 네트워크 시각화는 Research Insights 와 묶인 Option(O-2) — --insights 일 때만.
-        # (LLM 호출은 없지만 기능 분류상 인사이트 분석 부가물로 함께 게이트)
-        if args.insights:
-            run_step("generate_network",
-                     ["python", "pipeline/generate_network.py", "--topic", topic], 600)
-        else:
-            log("  [generate_network] SKIP (Option O-2 — --insights 일 때만 재생성)")
-
-        # Verify UMAP coordinate coverage before deploy
-        try:
-            topic_dir = str(get_topic_dir(topic))
-            umap_path = os.path.join(topic_dir, "_umap_coords.json")
-            idx_path = os.path.join(PAPERS_DIR, "_papers_index.json")
-            with open(idx_path, "r", encoding="utf-8") as f:
-                all_idx = json.load(f)
-            topic_slugs = {p["slug"] for p in all_idx if topic in p.get("topics", [])}
-            umap_slugs = set()
-            if os.path.exists(umap_path):
-                with open(umap_path, "r", encoding="utf-8") as f:
-                    umap_slugs = set(json.load(f).keys())
-            missing = topic_slugs - umap_slugs
-            if missing:
-                log(f"\n  [verify_umap] {len(missing)} papers missing UMAP coordinates — re-running topic_modeling...")
-                run_step("topic_modeling (umap fix)",
-                         [TOPIC_MODELING_PYTHON, "pipeline/topic_modeling.py", "--topic", topic, "--skip-connections"], 3600)
-                if args.insights:   # 네트워크는 Option(O-2) — --insights 일 때만
-                    run_step("generate_network (rebuild)",
-                             ["python", "pipeline/generate_network.py", "--topic", topic], 600)
-            else:
-                log(f"  [verify_umap] OK: all {len(topic_slugs)} papers have coordinates")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            log(f"  [verify_umap] WARNING: verification failed ({str(e)[:100]})")
-
-        run_step("review_to_html",
-                 ["python", "pipeline/review_to_html.py", "--all"], 600)
-        run_step("build_topic_index",
-                 ["python", "pipeline/build_topic_index.py", topic], 600)
-
-        # Atom 피드(feed.xml) — build_topic_index 가 심은 autodiscovery <link> 의 대상.
-        run_step("build_rss",
-                 ["python", "pipeline/build_rss.py", topic], 300)
-
-        # Deep Research search index (section-aware chunks + Gemini embeddings).
-        # Reads GOOGLE_API_KEY/GEMINI_API_KEY from env or config.json.
-        # Cleanup stale category narratives/timelines before building the
-        # search index so Deep Research never surfaces renamed categories.
-        # Always runs --execute because post-processing has just rewritten
-        # the classifier output; any orphan entries are safe to remove.
-        run_step("cleanup",
-                 ["python", "pipeline/cleanup.py", "--execute"], 300)
-
-        run_step("build_search_index",
-                 ["python", "pipeline/build_search_index.py", "--topic", topic], 900)
-
-        # `_cross` is a cheap merge of existing topic sidecars (no embedding
-        # calls). Keep the agent/CLI default collection synchronized after every
-        # source-topic rebuild; the generic page itself need not be regenerated.
-        run_step("build_cross_index",
-                 ["python", "pipeline/build_cross_index.py", "--no-page"], 300)
-
-        # Fixed query vectors make this a deterministic, network-free deploy
-        # gate. A source collection and the merged agent collection must both
-        # retain the tracked recall floor and baseline before publication.
-        eval_dir = PIPELINE_DIR / "eval"
-        eval_results = eval_dir / "results"
-        eval_common = [
-            "python", "pipeline/evaluate_retrieval.py",
-            "--queries", str(eval_dir / "retrieval_queries.jsonl"),
-            "--vectors", str(eval_dir / "retrieval_query_vectors.json"),
-            "--baseline", str(eval_dir / "retrieval_baseline.json"),
-            "--strict",
-            "--min-recall-at-5", "0",
-            "--max-regression", "0.025",
-        ]
-        run_step("evaluate_retrieval",
-                 eval_common + ["--topic", topic,
-                                "--output", str(eval_results / f"{topic}.json"),
-                                "--failures", str(eval_results / f"{topic}_failures.json")],
-                 300)
-        run_step("evaluate_retrieval (_cross)",
-                 eval_common + ["--topic", "_cross",
-                                "--output", str(eval_results / "_cross.json"),
-                                "--failures", str(eval_results / "_cross_failures.json")],
-                 300)
-        run_step(
-            "refresh_retrieval_eval_snapshot",
-            ["python", "pipeline/refresh_retrieval_eval_snapshot.py", "--if-installed"],
-            900,
-        )
-
-        # Deploy via wrangler (Cloudflare Workers with Static Assets) +
-        # idempotent gh-pages stub sync. Requires:
-        #   CLOUDFLARE_API_TOKEN (or CF_API_TOKEN), CLOUDFLARE_ACCOUNT_ID.
-        has_cf_token = bool(
-            os.environ.get("CLOUDFLARE_API_TOKEN") or os.environ.get("CF_API_TOKEN")
-        )
-        has_account_id = bool(os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
-        no_deploy = (getattr(args, "no_deploy", False)
-                     or bool(os.environ.get("PAPER_CURATION_NO_DEPLOY")))
-        if no_deploy:
-            log("\n  [prepare_deploy] SKIP: deploy suppressed "
-                "(--no-deploy / PAPER_CURATION_NO_DEPLOY)")
-        elif has_cf_token and has_account_id:
-            log("\n  [prepare_deploy] Cloudflare env vars found, deploying...")
-            try:
-                result = subprocess.run(
-                    ["python", "pipeline/prepare_deploy.py", "--topic", topic, "--push"],
-                    cwd=str(PIPELINE_DIR.parent),
-                    capture_output=True, text=True, timeout=1800,
-                    env={**os.environ, "PYTHONUTF8": "1"},
+                    log(f"  [{stage.name}] REUSED: validated in-process artifact")
+                    return
+                log(f"  [{stage.name}] REUSED: validated in-process artifact")
+                return
+            if stage.name == "bm25":
+                _ = build_transitional_sparse_index(topic, PROJECT_ROOT)
+                log("  [bm25] OK: deterministic sparse v2 sidecar")
+                return
+            log(f"  [{stage.name}] ...")
+            result = subprocess.run(
+                list(stage.argv),
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=timeouts.get(stage.name, 600),
+                env=safe_child_environment(runtime_policy),
+            )
+            if result.returncode != 0:
+                diagnostic = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    f"safe stage '{stage.name}' failed "
+                    f"(exit {result.returncode}): {diagnostic[-1000:]}"
                 )
-                if result.returncode == 0:
-                    log(f"  [prepare_deploy] OK: wrangler deploy + gh-pages sync done")
-                else:
-                    log(f"  [prepare_deploy] FAILED (exit {result.returncode})")
-                    if result.stderr:
-                        log(f"    {result.stderr[:500]}")
-                    raise RuntimeError(
-                        f"prepare_deploy failed with exit {result.returncode}"
-                    )
-            except Exception as e:
-                log(f"  [prepare_deploy] ERROR: {str(e)[:100]}")
-                raise
-        else:
-            missing = []
-            if not has_cf_token:
-                missing.append("CLOUDFLARE_API_TOKEN (or CF_API_TOKEN)")
-            if not has_account_id:
-                missing.append("CLOUDFLARE_ACCOUNT_ID")
-            log(f"\n  [prepare_deploy] SKIP: missing env vars — {', '.join(missing)}")
+            log(f"  [{stage.name}] OK")
 
-        log("\nPost-processing complete!")
+        try:
+            _ = execute_plan(
+                tuple(runnable),
+                topic=topic,
+                policy=runtime_policy,
+                state_root=safe_state_root,
+                workspace_root=PROJECT_ROOT,
+                runner=run_safe_stage,
+                resume=resuming_safe_run,
+                lease=safe_run_lease,
+                finalize=False,
+            )
+        except Exception as error:
+            log(f"SAFE POST-PROCESSING FAILED: {error}")
+            return 2
+
+        from pipeline.refresh_retrieval_eval_snapshot import (
+            main as refresh_retrieval_snapshot,
+        )
+
+        refresh_exit = refresh_retrieval_snapshot(
+            [
+                "--project-root",
+                str(PROJECT_ROOT),
+                "--if-installed",
+            ]
+        )
+        if refresh_exit != 0:
+            log("SAFE POST-PROCESSING FAILED: retrieval snapshot refresh")
+            close_safe_run(RunStatus.FAILED)
+            return 2
+
+    try:
+        accepted_artifacts = validate_default_artifacts(
+            topic,
+            Path(PAPERS_DIR).parent,
+        )
+        geometry_paths = [
+            f"docs/{artifact['path']}"
+            for row in accepted_artifacts
+            if row["stage"] == "geometry"
+            for artifact in cast(list[dict[str, str]], row["artifacts"])
+        ]
+        _ = artifact_manifest(
+            topic,
+            runtime_policy,
+            PROJECT_ROOT,
+            geometry_paths=geometry_paths,
+            validators=accepted_artifacts,
+        )
+    except (ArtifactValidationError, OSError, ValueError) as error:
+        log(f"SAFE ARTIFACT ACCEPTANCE FAILED: {error}")
+        close_safe_run(RunStatus.FAILED)
+        return 2
+
+    close_safe_run(RunStatus.SUCCEEDED)
+    log("\n  [prepare_deploy] SKIP: deployment is outside the local-safe profile")
+    log("\nPost-processing complete!")
+    return 0
 
 
 if __name__ == "__main__":
-    from _env_guard import force_py312
+    from pipeline._env_guard import force_py312
     force_py312()
-    main()
+    raise SystemExit(main())

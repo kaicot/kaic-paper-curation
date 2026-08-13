@@ -1,0 +1,31 @@
+{
+  "$id": "local-answer-request-v1",
+  "additionalProperties": false,
+  "properties": {
+    "length": {
+      "enum": [
+        "short",
+        "medium",
+        "long"
+      ],
+      "type": "string"
+    },
+    "query": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "topic": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "topic",
+    "query",
+    "length"
+  ],
+  "type": "object"
+}

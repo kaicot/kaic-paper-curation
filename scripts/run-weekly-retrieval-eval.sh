@@ -31,7 +31,6 @@ fi
 
 exec "$PYTHON" "$ROOT/pipeline/evaluate_retrieval.py" \
   --queries "$ROOT/pipeline/eval/retrieval_queries.jsonl" \
-  --vectors "$ROOT/pipeline/eval/retrieval_query_vectors.json" \
   --all \
   --baseline "$ROOT/pipeline/eval/retrieval_baseline.json" \
   --min-recall-at-5 0 \
