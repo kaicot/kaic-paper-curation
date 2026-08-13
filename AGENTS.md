@@ -16,12 +16,17 @@ Academic paper curation pipeline. Papers are fetched from Zotero, reviewed via l
 
 ## Installation Flow (Codex)
 
-사용자가 "여기에 paper-curation을 설치해줘: https://github.com/jehyunlee/paper-curation" 같은 요청을 하면, 아래 순서대로 진행한다.
+사용자가 "여기에 kaic-paper-curation을 설치해줘: https://github.com/kaicot/kaic-paper-curation"
+같은 요청을 하면, 아래 순서대로 진행한다.
+
+> ⚠️ **포크 구분**: 이 저장소는 kaicot 포크다. 설치·호출부호·스킬 이름은 반드시
+> `kaic-paper-curation` 을 사용하고, 원작(`jehyunlee/paper-curation`)의 스킬
+> 이름·설치 경로(`paper-curation`)와 혼동하지 않는다.
 
 ### Step 1: Clone & Dependencies
 ```bash
-git clone https://github.com/jehyunlee/paper-curation.git
-cd paper-curation
+git clone https://github.com/kaicot/kaic-paper-curation.git
+cd kaic-paper-curation
 pip install anthropic google-genai pymupdf Pillow requests opendataloader-pdf
 ```
 
@@ -67,7 +72,7 @@ setup.py는 6단계 설치 후 곧바로 첫 파이프라인을 실행한다:
 - [3/6] Zotero 연결 테스트 (User ID + 컬렉션 검증)
 - [4/6] PaperBanana 확인 (없으면 자동 클론)
 - [5/6] SKILL.md 생성
-- [6/6] SKILL.md를 `~/.Codex/skills/paper-curation/` 에 설치
+- [6/6] SKILL.md를 `~/.codex/skills/kaic-paper-curation/` 에 설치
 - [Step 7] `run_update_force.py --topic {alias}` 자동 실행 → Zotero 가져오기 → 리뷰 → 분류 → 인덱스 → Deep Research 검색 인덱스 → (GitHub 설정 시) 배포까지 한 번에. `--no-run` 플래그로 이 자동 실행은 건너뛸 수 있다.
 
 ### 컬렉션 오류 처리
