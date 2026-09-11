@@ -134,7 +134,7 @@ class TimelineCodex:
         identity = self.identity_factory(
             runtime_policy=self.runtime_policy,
             gateway=self.gateway,
-            role="long_form",
+            role="timeline",
             prompt_version=prompt_version,
             prompt=prompt,
             schema_version=schema_version,
@@ -145,7 +145,7 @@ class TimelineCodex:
 
         def produce():
             try:
-                candidate = self.gateway.generate_json("long_form", prompt, schema)
+                candidate = self.gateway.generate_json("timeline", prompt, schema)
                 return CacheSuccess(validator(candidate))
             except (
                 CodexGatewayError,
@@ -208,8 +208,15 @@ Return only JSON matching the supplied schema. Write 800-1500 Korean characters 
 complete paragraph, explaining chronological development, recent trends, and future direction."""
 
 
+def _timeline_generation_fingerprint() -> str:
+    from pipeline.model_config import role_fingerprint
+    return hashlib.sha256((role_fingerprint("timeline") + ":timeline-category-prompt-v1:timeline-category-v1").encode()).hexdigest()
+
+
 def _entry_is_current(entry: object, input_hash: str) -> bool:
     if not isinstance(entry, dict) or entry.get("source_sha256") != input_hash:
+        return False
+    if entry.get("_generation_fingerprint") != _timeline_generation_fingerprint():
         return False
     clean = cast(
         JsonObject,
@@ -332,6 +339,7 @@ def _run_timeline(
             )
             cached = cast(JsonObject, dict(clean))
             cached["source_sha256"] = input_hash
+            cached["_generation_fingerprint"] = _timeline_generation_fingerprint()
             cached_categories.append(cached)
             clean_categories.append(clean)
             generated += 1

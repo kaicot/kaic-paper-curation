@@ -252,7 +252,7 @@ class LocalAnswerCodex:
         identity = CacheIdentity.from_gateway(
             runtime_policy=self.runtime_policy,
             gateway=self.gateway,
-            role="long_form",
+            role="answer",
             prompt_version="local-answer-prompt-v1",
             prompt=prompt,
             schema_version=RESPONSE_SCHEMA,
@@ -272,7 +272,7 @@ class LocalAnswerCodex:
             for attempt in range(2):
                 try:
                     generated = self.gateway.generate_json(
-                        "long_form",
+                        "answer",
                         active_prompt,
                         self.schema,
                     )

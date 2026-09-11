@@ -19,7 +19,7 @@
 ### 2. 구조화 리뷰
 
 - PDF → `text.md` + `figures/` 추출 (PyMuPDF, opendataloader 없으면 자동 fallback)
-- Codex(Terra, long_form)가 6섹션 한국어 `review.md` 생성:
+- Codex(Terra 기본, review 역할; Astra 선택 가능)가 6섹션 한국어 `review.md` 생성:
   Essence·Motivation·Achievement·How·Originality·Limitation·Evaluation
 - `schema_version: v1` frontmatter 필수
 - `.llm_cache` 로 동일 입력 재호출 방지
@@ -35,7 +35,7 @@
 ### 4. 논문 연결 (같이 보면 좋은 논문)
 
 - 임베딩 코사인 유사도로 후보 선별
-- Codex(Luna, short_form)가 관계 유형 + 한국어 이유 1문장 생성
+- Codex(Terra, connections)가 관계 유형 + 한국어 이유 1문장 생성
 - `_paper_connections.json` 에 저장
 
 ### 5. 요약 + 타임라인 + 검색 인덱스

@@ -12,6 +12,7 @@
 !SKILL.md.template
 !config.example.json
 !requirements.txt
+!requirements-lock-py312-full.txt
 !CLAUDE.md
 !AGENTS.md
 !workflow.png
@@ -20,6 +21,8 @@
 # Pipeline scripts
 !pipeline/
 !pipeline/*.py
+!pipeline/python-runtime-policy-v1.json
+!pipeline/model-config.json
 !pipeline/lib/
 !pipeline/lib/*.py
 !pipeline/lib/citedby/

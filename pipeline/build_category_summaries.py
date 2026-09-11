@@ -117,7 +117,7 @@ class SummaryCodex:
             identity = self.identity_factory(
                 runtime_policy=self.runtime_policy,
                 gateway=self.gateway,
-                role="short_form",
+                role="category_summary",
                 prompt_version="category-summary-prompt-v1",
                 prompt=attempt_prompt,
                 schema_version="category-summary-v1",
@@ -130,7 +130,7 @@ class SummaryCodex:
                 nonlocal last_issue
                 try:
                     value = self.gateway.generate_json(
-                        "short_form",
+                        "category_summary",
                         attempt_prompt,
                         SUMMARY_SCHEMA,
                     )

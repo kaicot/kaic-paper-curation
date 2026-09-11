@@ -17,8 +17,8 @@ from pipeline.runtime_policy import RuntimePolicy
 from pipeline.schemas.codex_schema import JsonObject, JsonValue
 
 
-CACHE_SCHEMA: Final = "generation-cache-v1"
-CACHE_SCHEMA_VERSION: Final = 1
+CACHE_SCHEMA: Final = "generation-cache-v2"
+CACHE_SCHEMA_VERSION: Final = 2
 _DIGEST_SIZE: Final = 64
 _MAX_ENVELOPE_BYTES: Final = 1_048_576
 FailureStatus: TypeAlias = Literal["denied", "cancelled", "failed", "partial"]
@@ -57,6 +57,7 @@ class CacheIdentity:
     schema_sha256: str
     source_sha256: str
     task_id: str
+    compatibility_epoch: str = "strict-v1"
 
     @classmethod
     def from_gateway(
@@ -75,6 +76,11 @@ class CacheIdentity:
         """Derive trust fields from one freshly verified Codex attestation."""
         if runtime_policy.mode != "codex" or runtime_policy.allow_paid_api is not False:
             raise GenerationCacheError("policy-denied", "Codex generation is not allowed")
+        # This factory belongs to an authorized generation operation. Read-only
+        # diagnostics use capability_inventory directly and never qualify here.
+        ensure_ready = getattr(gateway, "ensure_ready", None)
+        if callable(ensure_ready):
+            ensure_ready(role)
         before_bytes = _read_regular_bytes(gateway.paths.attestation)
         attestation = _strict_object(before_bytes)
         inventory = gateway.capability_inventory()
@@ -128,6 +134,7 @@ class CacheIdentity:
             schema_sha256=_sha256(_canonical(schema)),
             source_sha256=_sha256(source),
             task_id=task_id,
+            compatibility_epoch=str(inventory.get("cache_compatibility_epoch", "strict-v1")),
         )
 
     def __post_init__(self) -> None:
@@ -166,12 +173,17 @@ class CacheIdentity:
             "signed_binary_sha256": self.signed_binary_sha256,
             "source_sha256": self.source_sha256,
             "task_id": self.task_id,
+            "compatibility_epoch": self.compatibility_epoch,
         }
+
+    def reuse_identity(self) -> JsonObject:
+        """Separate output compatibility from the recorded runtime provenance."""
+        return _reuse_identity(self.as_json())
 
     @property
     def digest(self) -> str:
         """Derive the content-addressed filename from every safety dimension."""
-        return _sha256(_canonical(self.as_json()))
+        return _sha256(_canonical(self.reuse_identity()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,15 +212,20 @@ class GenerationCache:
     def __init__(self, directory: Path, before_publish: BeforePublish | None = None) -> None:
         self.directory: Path = directory
         self.before_publish: BeforePublish | None = before_publish
+        self.last_provenance: JsonObject | None = None
 
     def load(self, identity: CacheIdentity) -> JsonObject | None:
         """Return an exact valid success envelope, treating every other file as a miss."""
         path = self._path(identity)
+        self.last_provenance = None
         try:
             if not path.is_file() or path.is_symlink() or path.stat().st_size > _MAX_ENVELOPE_BYTES:
                 return None
             payload = _load_json(path)
-            return _read_envelope(payload, identity)
+            result = _read_envelope(payload, identity)
+            if result is not None and isinstance(payload, dict):
+                self.last_provenance = cast(JsonObject, payload["identity"])
+            return result
         except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError, GenerationCacheError):
             return None
 
@@ -246,6 +263,7 @@ class GenerationCache:
                 self.before_publish(temporary)
             _require_envelope(temporary, identity)
             os.replace(temporary, self._path(identity))
+            self.last_provenance = identity.as_json()
         finally:
             shutil.rmtree(temporary_root, ignore_errors=True)
 
@@ -254,6 +272,7 @@ def _success_envelope(identity: CacheIdentity, result: JsonObject) -> JsonObject
     return {
         "identity": identity.as_json(),
         "identity_sha256": identity.digest,
+        "provenance_sha256": _sha256(_canonical(identity.as_json())),
         "result": result,
         "result_sha256": _sha256(_canonical(result)),
         "schema": CACHE_SCHEMA,
@@ -265,7 +284,7 @@ def _success_envelope(identity: CacheIdentity, result: JsonObject) -> JsonObject
 def _read_envelope(payload: JsonValue, identity: CacheIdentity) -> JsonObject | None:
     if not isinstance(payload, dict):
         return None
-    expected = {"identity", "identity_sha256", "result", "result_sha256", "schema", "schema_version", "state"}
+    expected = {"identity", "identity_sha256", "provenance_sha256", "result", "result_sha256", "schema", "schema_version", "state"}
     if set(payload) != expected:
         return None
     result = payload["result"]
@@ -275,12 +294,24 @@ def _read_envelope(payload: JsonValue, identity: CacheIdentity) -> JsonObject | 
         payload["schema"] != CACHE_SCHEMA
         or payload["schema_version"] != CACHE_SCHEMA_VERSION
         or payload["state"] != "succeeded"
-        or payload["identity"] != identity.as_json()
+        or not isinstance(payload["identity"], dict)
+        or _reuse_identity(payload["identity"]) != identity.reuse_identity()
+        or payload["provenance_sha256"] != _sha256(_canonical(payload["identity"]))
         or payload["identity_sha256"] != identity.digest
         or payload["result_sha256"] != _sha256(_canonical(result))
     ):
         return None
     return result
+
+
+def _reuse_identity(value: JsonObject) -> JsonObject:
+    semantic = dict(value)
+    if value.get("compatibility_epoch") == "generation-contract-v2":
+        # Both producer and consumer were qualified against the same executable
+        # behavior contract. Their distinct provenance remains in the envelope.
+        for name in ("cli_version", "signed_binary_sha256", "attestation_sha256"):
+            semantic.pop(name, None)
+    return semantic
 
 
 def _load_json(path: Path) -> JsonValue:

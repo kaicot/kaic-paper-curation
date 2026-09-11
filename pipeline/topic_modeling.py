@@ -20,7 +20,6 @@ import json
 import os
 import re
 import sys
-import numpy as np
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +28,12 @@ from typing import Protocol, cast, final
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+if __name__ == "__main__":
+    from pipeline._env_guard import force_py312
+    force_py312()
+
+import numpy as np  # noqa: E402
 
 from pipeline.config_loader import (  # noqa: E402
     PAPERS_DIR as _PAPERS_DIR,
@@ -641,7 +646,7 @@ Rules:
 """
 
         value = generator.generate(
-            role="short_form",
+            role="topic_labels",
             prompt=prompt,
             schema=SUBTOPIC_SCHEMA,
             schema_version="topic-subtopic-label-v1",
@@ -711,7 +716,7 @@ def generate_category_labels(generator, topic, prompt, source_groups, category_i
     if generator is None:
         raise TopicSemanticError("category label generator is required")
     value = generator.generate(
-        role="short_form",
+        role="topic_labels",
         prompt=prompt,
         schema=CATEGORY_SCHEMA,
         schema_version="topic-category-label-v1",
@@ -1043,7 +1048,7 @@ Reasons must be one concrete Korean sentence. Return JSON matching the supplied 
         ).hexdigest()[:16]
         try:
             value = generator.generate(
-                role="long_form",
+                role="connections",
                 prompt=prompt,
                 schema=CONNECTION_SCHEMA,
                 schema_version="topic-connections-v1",
@@ -1375,6 +1380,4 @@ def main():
 
 
 if __name__ == "__main__":
-    from pipeline._env_guard import force_py312
-    force_py312()
     raise SystemExit(main())

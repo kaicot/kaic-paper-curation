@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "runtime_id": "python312",
+  "implementation": "CPython",
+  "supported_python": {
+    "major": 3,
+    "minor": 12
+  },
+  "runtime_dir": ".tools/python312",
+  "attestation_path": ".omo/runtime/python312-resolved.json",
+  "managed_runtimes_dir": ".tools/python312-runtimes",
+  "active_runtime_path": ".omo/runtime/python312-active.json",
+  "candidate_runtime_path": ".omo/runtime/python312-candidate.json",
+  "previous_runtime_path": ".omo/runtime/python312-previous.json",
+  "lock_snapshots_dir": ".omo/runtime/locks",
+  "legacy_requirements_lock": "requirements-lock-py312.txt",
+  "qualification_requirements_lock": "requirements-lock-py312-full.txt",
+  "candidate_environment_variable": "PAPER_CURATION_PY312"
+}

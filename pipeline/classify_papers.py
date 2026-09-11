@@ -50,11 +50,15 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-import numpy as np
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+if __name__ == "__main__":
+    from pipeline._env_guard import force_py312
+    force_py312()
+
+import numpy as np  # noqa: E402
 
 from pipeline.config_loader import PAPERS_DIR as _PAPERS_DIR, get_topic_dir  # noqa: E402
 PAPERS_DIR = str(_PAPERS_DIR)
@@ -367,6 +371,4 @@ def main():
 
 
 if __name__ == "__main__":
-    from pipeline._env_guard import force_py312
-    force_py312()
     raise SystemExit(main())

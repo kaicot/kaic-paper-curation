@@ -262,7 +262,7 @@ class CodexConnectionsTests(unittest.TestCase):
                 )
             self.assertEqual(first["status"], "ok")
             self.assertEqual(second["status"], "ok")
-            self.assertEqual(gateway.calls, ["long_form"])
+            self.assertEqual(gateway.calls, ["connections"])
             self.assertEqual(
                 (topic_dir / "_paper_connections.json").read_bytes(),
                 first_bytes,
@@ -317,7 +317,7 @@ class CodexConnectionsTests(unittest.TestCase):
                 )
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["reason"], "generation-incomplete")
-            self.assertEqual(gateway.calls, ["long_form"])
+            self.assertEqual(gateway.calls, ["connections"])
             self.assertEqual(connection_path.read_bytes(), prior)
             self.assertEqual(list(failure_cache.glob("*.json")), [])
             self.assertFalse((topic_dir / "_insights.json").exists())
@@ -355,7 +355,7 @@ class CodexConnectionsTests(unittest.TestCase):
                     )
                 self.assertEqual(typed_result["status"], "failed")
                 self.assertEqual(connection_path.read_bytes(), prior)
-                self.assertEqual(typed_gateway.calls, ["long_form"])
+                self.assertEqual(typed_gateway.calls, ["connections"])
 
     def test_off_and_explicit_insights_deny_before_data_or_generator(self) -> None:
         prior = b'{"preserved":true}\n'

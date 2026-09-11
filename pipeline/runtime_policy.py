@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
+from pipeline.model_config import load_role_models
+
 
 RuntimeMode: TypeAlias = Literal["codex", "off"]
 JsonScalar: TypeAlias = None | bool | int | float | str
@@ -73,10 +75,8 @@ class RuntimePolicy:
             "capabilities": capabilities,
             "counters": zero_counters(),
             "mode": self.mode,
-            "roles": {
-                "long_form": {"model": "gpt-5.6-terra", "reasoning_effort": "xhigh"},
-                "short_form": {"model": "gpt-5.6-luna", "reasoning_effort": "xhigh"},
-            },
+            "roles": {role: {"model": model, "reasoning_effort": effort}
+                      for role, (model, effort) in load_role_models().items()},
             "schema": "runtime-policy-v2",
             "schema_version": 2,
             "status": "allowed",

@@ -25,6 +25,11 @@ from pipeline.config_loader import (  # noqa: E402
     local_zotero_status,
     resolve_user_profile,
 )
+from pipeline.python_runtime import (  # noqa: E402
+    PythonRuntimeError,
+    project_root as python_runtime_root,
+    validate_runtime,
+)
 from pipeline.lib.specter2_cache import (  # noqa: E402
     Specter2CacheUnavailable,
     verify_cache,
@@ -296,61 +301,23 @@ def _digest(path: Path) -> str:
 
 
 def _runtime_root() -> Path:
-    for parent in (PROJECT_ROOT, *PROJECT_ROOT.parents):
-        if (
-            (parent / ".tools/python312/python.exe").is_file()
-            and (parent / ".omo/runtime/python312-resolved.json").is_file()
-        ):
-            return parent
-    raise RuntimeError("python-runtime-unavailable")
+    """Return the policy-bearing checkout rather than an ambient tool path."""
+    return python_runtime_root(PROJECT_ROOT)
 
 
 def _python_status() -> CheckResult:
     try:
         root = _runtime_root()
-        runtime = root / ".tools/python312"
-        executable = runtime / "python.exe"
-        attestation_path = root / ".omo/runtime/python312-resolved.json"
-        attestation_value = cast(
-            object,
-            json.loads(attestation_path.read_text(encoding="utf-8")),
+        runtime = validate_runtime(root, verify_files=True)
+        if os.path.normcase(str(Path(sys.executable).resolve())) != os.path.normcase(str(runtime.executable.resolve())):
+            raise PythonRuntimeError("python-runtime-not-active")
+        code = (
+            "python-runtime-qualified"
+            if runtime.trust_kind == "qualified"
+            else "python-runtime-legacy-attested"
         )
-        if not isinstance(attestation_value, dict):
-            raise ValueError
-        attestation = cast(dict[str, object], attestation_value)
-        if (
-            tuple(sys.version_info[:3]) != (3, 12, 10)
-            or os.path.normcase(str(Path(sys.executable).resolve()))
-            != os.path.normcase(str(executable.resolve()))
-            or _digest(executable)
-            != attestation.get("python_executable_sha256")
-            or _digest(runtime / "python312._pth")
-            != attestation.get("pth_sha256")
-            or _digest(runtime / "python312.zip")
-            != attestation.get("stdlib_sha256")
-        ):
-            raise ValueError
-        raw_package_files = attestation.get("package_files")
-        if not isinstance(raw_package_files, list):
-            raise ValueError
-        package_files = cast(list[object], raw_package_files)
-        for item in package_files:
-            if not isinstance(item, dict):
-                raise ValueError
-            package = cast(dict[str, object], item)
-            relative = package.get("path")
-            if not isinstance(relative, str):
-                raise ValueError
-            candidate = runtime / relative
-            if (
-                not candidate.is_file()
-                or candidate.is_symlink()
-                or candidate.stat().st_size != package.get("size")
-                or _digest(candidate) != package.get("sha256")
-            ):
-                raise ValueError
-        return CheckResult("pass", "python-runtime-attested")
-    except Exception:
+        return CheckResult("pass", code)
+    except (OSError, ValueError, PythonRuntimeError):
         return CheckResult("fail", "python-runtime-invalid")
 
 
@@ -746,4 +713,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Route CLI invocations before readiness checks compare the active runtime.
+    # This is intentionally after module definitions so imports remain safe for
+    # unit tests, but before any configuration, credential, or network action.
+    from pipeline._env_guard import force_py312
+
+    force_py312()
     raise SystemExit(main())

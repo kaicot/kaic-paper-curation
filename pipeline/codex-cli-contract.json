@@ -1,69 +1,19 @@
 {
+  "cache_compatibility_epoch": "generation-contract-v2",
+  "compatibility_probe": {
+    "argv": ["exec", "--help"],
+    "required_options": ["--ignore-user-config", "--ignore-rules", "--sandbox", "--ephemeral", "--output-schema", "--output-last-message"]
+  },
   "environment": {
-    "allowlist": [
-      "SystemRoot",
-      "WINDIR",
-      "ComSpec",
-      "PATHEXT",
-      "TEMP",
-      "TMP",
-      "USERPROFILE",
-      "LOCALAPPDATA",
-      "APPDATA",
-      "HOMEDRIVE",
-      "HOMEPATH",
-      "OS",
-      "PROCESSOR_ARCHITECTURE",
-      "NUMBER_OF_PROCESSORS",
-      "PATH",
-      "LANG",
-      "LC_ALL"
-    ],
+    "allowlist": ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOMEDRIVE", "HOMEPATH", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "PATH", "LANG", "LC_ALL"],
     "lang": "en_US.UTF-8",
     "path_suffix": "C:\\Windows\\System32"
   },
   "generation": {
-    "argv_template": [
-      "exec",
-      "--ignore-user-config",
-      "--ignore-rules",
-      "--cd",
-      "{empty_cwd}",
-      "--model",
-      "{model}",
-      "-c",
-      "model_reasoning_effort=\"{reasoning_effort}\"",
-      "--sandbox",
-      "read-only",
-      "--ephemeral",
-      "--json",
-      "--color",
-      "never",
-      "--output-schema",
-      "{output_schema}",
-      "--output-last-message",
-      "{output_last_message}",
-      "-"
-    ],
+    "argv_template": ["exec", "--ignore-user-config", "--ignore-rules", "--cd", "{empty_cwd}", "--model", "{model}", "-c", "model_reasoning_effort=\"{reasoning_effort}\"", "--sandbox", "read-only", "--ephemeral", "--json", "--color", "never", "--output-schema", "{output_schema}", "--output-last-message", "{output_last_message}", "-"],
     "result_source": "output-last-message-only"
   },
-  "roles": {
-    "long_form": {
-      "model": "gpt-5.6-terra",
-      "reasoning_effort": "xhigh"
-    },
-    "short_form": {
-      "model": "gpt-5.6-luna",
-      "reasoning_effort": "xhigh"
-    }
-  },
-  "schema": "codex-cli-contract-v1",
-  "schema_version": 1,
-  "status": {
-    "argv": [
-      "login",
-      "status"
-    ],
-    "expected_stdout": "Logged in using ChatGPT"
-  }
+  "schema": "codex-cli-contract-v2",
+  "schema_version": 2,
+  "status": {"argv": ["login", "status"], "expected_stdout": "Logged in using ChatGPT"}
 }

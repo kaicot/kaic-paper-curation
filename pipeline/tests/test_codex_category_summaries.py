@@ -200,7 +200,7 @@ class CodexCategorySummaryTests(unittest.TestCase):
             )
             self.assertEqual(first, second)
             self.assertNotEqual(first, changed)
-            self.assertEqual(gateway.calls, ["short_form", "short_form"])
+            self.assertEqual(gateway.calls, ["category_summary", "category_summary"])
 
             retry_gateway = FakeGateway(
                 [
@@ -224,7 +224,7 @@ class CodexCategorySummaryTests(unittest.TestCase):
                 label="retry",
             )
             self.assertIn("재시도", retry_text)
-            self.assertEqual(retry_gateway.calls, ["short_form", "short_form"])
+            self.assertEqual(retry_gateway.calls, ["category_summary", "category_summary"])
             self.assertEqual(len(list((Path(directory) / "retry-cache").glob("*.json"))), 1)
 
     def test_terminal_invalid_korean_has_no_success_cache(self) -> None:
@@ -251,7 +251,7 @@ class CodexCategorySummaryTests(unittest.TestCase):
                     task_id="category-summary:fixture:invalid",
                     label="invalid",
                 )
-            self.assertEqual(gateway.calls, ["short_form", "short_form"])
+            self.assertEqual(gateway.calls, ["category_summary", "category_summary"])
             self.assertEqual(list((Path(directory) / ".llm_cache").glob("*.json")), [])
 
     def test_atomic_publish_exact_reuse_and_failure_preserves_prior(self) -> None:
@@ -319,7 +319,7 @@ class CodexCategorySummaryTests(unittest.TestCase):
                 self.assertEqual(failed["status"], "failed")
                 self.assertEqual(
                     failed_gateway.calls,
-                    ["short_form", "short_form"],
+                    ["category_summary", "category_summary"],
                 )
                 self.assertEqual(list(failed_cache.glob("*.json")), [])
                 self.assertEqual(summary_path.read_bytes(), first_bytes)

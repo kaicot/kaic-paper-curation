@@ -2,6 +2,13 @@
 
 이 파일은 Codex(및 유사 에이전트)가 이 저장소에서 작업할 때 따를 지침이다.
 
+## 작업 위치와 소스 보관본
+
+- 실제 작업 원본은 `D:\workspace\kaic-paper-curation`이다. 코드 수정·실행·Git 작업은 여기서만 한다.
+- `D:\OneDrive\AI\kaic-paper-curation`은 커밋된 소스 보관본이다. 그 위치에서 이 문서를 읽었다면 실제 작업 경로로 전환한다. 보관본에 `.git`, 실행 환경, 캐시를 만들지 않는다.
+- 작업을 검증하고 로컬 커밋하면 post-commit 훅이 소스 보관본을 갱신한다. 수동 갱신은 `scripts/update-source-snapshot.ps1`이다. GitHub push는 별도 요청 범위다.
+- 보관본의 직접 수정이 감지되면 자동 덮어쓰지 않는다. 보관본을 수작업으로 편집하기보다 D 드라이브 원본을 수정한다.
+
 ## 🚫 원작과의 모든 교류 금지 (운영자 지시 2026-08-13)
 
 - 이 저장소는 **kaicot 포크**다. 원작 저장소(`jehyunlee/paper-curation`, upstream)에
@@ -95,7 +102,7 @@ Remove-Item -LiteralPath "pipeline\_update_force_checkpoint.json" -Force
 ### 3. (선택) 저장소 자체 제거
 
 ```powershell
-Remove-Item -LiteralPath "D:\OneDrive\AI\kaic-paper-curation" -Recurse -Force
+Remove-Item -LiteralPath "D:\workspace\kaic-paper-curation" -Recurse -Force
 ```
 
 > ⚠️ 삭제 전에 `docs/papers` 안에 리뷰 결과가 있으면 백업을 권장한다.
@@ -122,7 +129,7 @@ Remove-Item -LiteralPath "D:\OneDrive\AI\kaic-paper-curation" -Recurse -Force
 | 2 | `build_papers_index.py` | 마스터 인덱스 재생성 |
 | 3 | `topic_modeling.py` / `classify_papers.py` | SPECTER2+HDBSCAN 분류 (LLM 없음) |
 | 4 | `build_category_summaries.py` | 카테고리 요약 (Codex Luna) |
-| 4.5 | `extract_insights.py` | 논문 연결 (Codex Luna) |
+| 4.5 | `extract_insights.py` | 논문 연결 (Codex Terra) |
 | 5 | `generate_timelines.py` | 타임라인 내러티브 (Codex Terra) |
 | 5.5 | `generate_network.py` | D3 네트워크 |
 | 6 | `validate_papers.py` | 검증 게이트 |
@@ -144,7 +151,7 @@ Remove-Item -LiteralPath "D:\OneDrive\AI\kaic-paper-curation" -Recurse -Force
 
 ## Python 환경
 
-- **Python 3.12 단독** (py314 금지 — numba 호환성). `_env_guard` 가 자동 라우팅.
+- **검증된 Python 3.12 계열**을 사용한다. 패치 버전은 후보 환경 검증 후 갱신하며, 다른 minor 계열은 의존성 검증과 정책 변경 전 자동 채택하지 않는다. `_env_guard`와 공통 런타임 선택기를 사용하고 시스템 `py`/`PATH`를 신뢰해 우회하지 않는다.
 - Windows: 모든 명령에 `PYTHONUTF8=1` 접두사.
 - 클러스터링(UMAP/HDBSCAN/SPECTER2)은 로컬에서 실행되며 `.cache/` 에 모델 캐시.
 
@@ -155,3 +162,10 @@ Remove-Item -LiteralPath "D:\OneDrive\AI\kaic-paper-curation" -Recurse -Force
 - `--llm-mode off` 는 결정론 단계만 (생성 거부 exit 3).
 - 비밀 검사: `scripts/scan-secrets.py` (커밋 전 실행).
 - config.json·.cache·.omo 는 gitignore 로 푸시 제외.
+
+## 모델 및 실행 환경 업데이트
+
+- 작업별 모델과 추론 수준은 `pipeline/model-config.json`이 단일 기준이다. 기본 리뷰·답변·타임라인·논문 연결은 Terra, 짧은 요약·분류명은 Luna다. Astra는 선택 가능하지만 이 환경의 긴 본문 호출 시간 초과로 기본 적용을 보류했다. 명시적인 모델 변경은 해당 역할만 바꾸고 재검증한다.
+- CLI 버전 번호를 코드에 다시 고정하지 않는다. 서명·격리 옵션·구조화 출력의 호환성을 확인한 실행 기록을 사용한다.
+- 조회/진단은 모델을 호출하지 않는다. 명시적 재검증 및 승인된 생성 작업에서만 최소 생성 검사를 수행한다.
+- 모델·CLI·Python 변경만으로 기존 리뷰를 일괄 덮어쓰지 않는다. 비교 결과는 `.omo` 아래 별도 저장하며 원본 자료는 보존한다.

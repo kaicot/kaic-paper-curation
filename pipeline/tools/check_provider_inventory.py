@@ -121,8 +121,24 @@ def scan_worktree(root: Path, patterns: JsonObject, scanner: JsonObject) -> list
                 "discovery_reasons": reason_values,
                 "path": path,
             }
+            if is_local_runtime_reference(path, (root / path).read_bytes(), patterns):
+                row["classification"] = "local-runtime-reference"
             rows.append(row)
     return rows
+
+
+def is_local_runtime_reference(path: str, source: bytes, patterns: JsonObject) -> bool:
+    """Classify signing/dependency labels while retaining every paid-API guard.
+
+    This is deliberately not a source exclusion: imports, constructors, hosts,
+    credential literals and dynamic calls continue to be counted and denied.
+    """
+    audited = {"pipeline/providers/codex_gateway.py", "pipeline/tests/test_codex_exec.py",
+               "pipeline/tests/test_python_runtime.py"}
+    if path not in audited:
+        return False
+    findings = finding_multiset(path, source, patterns)
+    return bool(findings) and set(findings) == {("lexical", "openai", "openai")}
 
 
 def owner(path: str) -> int:
@@ -680,8 +696,12 @@ def main() -> int:
         current_rows = scan_worktree(root, patterns, scanner)
         unresolved: list[str] = []
         quarantine_findings = 0
+        local_runtime_references = 0
         for row in current_rows:
             path = string_value(row, "path")
+            if row.get("classification") == "local-runtime-reference":
+                local_runtime_references += 1
+                continue
             if path == QUARANTINE_PATH:
                 quarantine_findings += 1
                 continue
@@ -742,6 +762,7 @@ def main() -> int:
             "clean_default_modules": [module for module in CLEAN_DEFAULT_MODULES],
             "poison_imported": len(poison_imported),
             "quarantine_findings": quarantine_findings,
+            "local_runtime_references": local_runtime_references,
         }
         _ = sys.stdout.buffer.write(canonical(summary))
     except (OSError, KeyError, ValueError, json.JSONDecodeError, InventoryError) as error:

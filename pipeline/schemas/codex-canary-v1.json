@@ -4,6 +4,12 @@
   "properties": {
     "role": {
       "enum": [
+        "review",
+        "answer",
+        "timeline",
+        "connections",
+        "category_summary",
+        "topic_labels",
         "long_form",
         "short_form"
       ],

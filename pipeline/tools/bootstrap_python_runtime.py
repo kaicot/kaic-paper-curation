@@ -3,7 +3,13 @@
 # requires-python = ">=3.12,<3.13"
 # dependencies = []
 # ///
-"""Provision the frozen repository-local CPython runtime."""
+"""Verify or explicitly qualify the repository-local CPython 3.12 runtime.
+
+The legacy frozen-archive command remains for recovery of the original 3.12.10
+bundle.  Normal maintenance uses ``--check-only`` and, after an operator has
+selected a candidate, ``--qualify-candidate``.  No command chooses or downloads
+a newer Python on its own.
+"""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +23,21 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Final
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from pipeline.python_runtime import (  # noqa: E402
+    PythonRuntimeError,
+    discover_candidates,
+    promote_staged_candidate,
+    qualify_candidate,
+    rollback_previous_runtime,
+    stage_candidate,
+    validate_runtime,
+)
 
 
 ARCHIVE_SIZE: Final = 11_133_606
@@ -150,18 +171,59 @@ def provision(archive: Path, target: Path, pip_wheel: Path, requirements: Path, 
             shutil.rmtree(stage)
 
 
+def _emit_runtime(runtime: object) -> None:
+    """Emit only non-secret runtime identity details for operators and tests."""
+    executable = getattr(runtime, "executable")
+    version = getattr(runtime, "version")
+    trust_kind = getattr(runtime, "trust_kind")
+    print(json.dumps({"executable": str(executable), "python_version": version, "status": "pass", "trust_kind": trust_kind}, sort_keys=True))
+
+
 def main() -> int:
-    """Parse the bootstrap CLI boundary."""
+    """Parse check, qualification, and legacy frozen-recovery commands."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--archive", type=Path, required=True)
-    parser.add_argument("--target", type=Path, required=True)
-    parser.add_argument("--pip-wheel", type=Path, required=True)
-    parser.add_argument("--requirements", type=Path, required=True)
-    parser.add_argument("--json-out", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check-only", action="store_true")
+    mode.add_argument("--stage-candidate", type=Path)
+    mode.add_argument("--promote-staged", action="store_true")
+    mode.add_argument("--rollback-previous", action="store_true")
+    mode.add_argument("--qualify-candidate", type=Path)
+    mode.add_argument("--list-candidates", action="store_true")
+    parser.add_argument("--project-root", type=Path, default=REPO_ROOT)
+    # Legacy frozen-archive recovery arguments.  They are kept optional here
+    # so maintenance modes do not need an archive or a wheel.
+    parser.add_argument("--archive", type=Path)
+    parser.add_argument("--target", type=Path)
+    parser.add_argument("--pip-wheel", type=Path)
+    parser.add_argument("--requirements", type=Path)
+    parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
     try:
+        root = args.project_root.resolve()
+        if args.check_only:
+            _emit_runtime(validate_runtime(root, verify_files=True))
+            return 0
+        if args.list_candidates:
+            print(json.dumps({"candidates": [str(path) for path in discover_candidates(root)]}, sort_keys=True))
+            return 0
+        if args.qualify_candidate is not None:
+            _emit_runtime(qualify_candidate(args.qualify_candidate, root))
+            return 0
+        if args.stage_candidate is not None:
+            _emit_runtime(stage_candidate(args.stage_candidate, root))
+            return 0
+        if args.promote_staged:
+            _emit_runtime(promote_staged_candidate(root))
+            return 0
+        if args.rollback_previous:
+            _emit_runtime(rollback_previous_runtime(root))
+            return 0
+        legacy = (args.archive, args.target, args.pip_wheel, args.requirements, args.json_out)
+        if any(value is None for value in legacy):
+            parser.error("choose a maintenance mode or provide all legacy archive arguments")
+        assert args.archive is not None and args.target is not None and args.pip_wheel is not None and args.requirements is not None and args.json_out is not None
         provision(args.archive.resolve(), args.target.resolve(), args.pip_wheel.resolve(), args.requirements.resolve(), args.json_out.resolve())
-    except ProvisionError as error:
+    except (ProvisionError, PythonRuntimeError) as error:
         print(f"runtime bootstrap denied: {error}", file=sys.stderr)
         return 2
     return 0

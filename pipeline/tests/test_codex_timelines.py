@@ -322,7 +322,7 @@ assert events == [], events
                         ),
                     ),
                 )
-            self.assertEqual(gateway.calls, ["long_form"])
+            self.assertEqual(gateway.calls, ["timeline"])
             self.assertEqual(list(cache_path.glob("*.json")), [])
 
     def test_long_form_schema_cache_and_source_invalidation(self) -> None:
@@ -399,7 +399,7 @@ assert events == [], events
             )
             self.assertEqual(first, second)
             self.assertNotEqual(first, changed)
-            self.assertEqual(gateway.calls, ["long_form", "long_form", "long_form"])
+            self.assertEqual(gateway.calls, ["timeline", "timeline", "timeline"])
 
     def test_text_only_changed_category_merge_and_failure_preservation(self) -> None:
         with tempfile.TemporaryDirectory(prefix="timeline-stage-") as directory:

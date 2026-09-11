@@ -24,6 +24,20 @@ NODE_ATTESTATION = ROOT / ".omo/runtime/node-resolved.json"
 
 
 class ProviderInventoryTests(unittest.TestCase):
+    def test_local_runtime_signer_labels_do_not_exempt_provider_operations(self) -> None:
+        from pipeline.tools.check_provider_inventory import is_local_runtime_reference
+        patterns = json.loads(PATTERNS.read_text(encoding="utf-8"))
+        path = "pipeline/providers/codex_gateway.py"
+        self.assertTrue(is_local_runtime_reference(path, b'SIGNER = "OpenAI OpCo"', patterns))
+        self.assertFalse(is_local_runtime_reference("pipeline/unowned.py", b'x = "OpenAI"', patterns))
+        for source in (
+            b'import openai', b'from openai import OpenAI', b'client = OpenAI()',
+            b'importlib.import_module("openai")', b'url = "https://api.openai.com/v1/responses"',
+            b'os.getenv("OPENAI_API_KEY")', b'x = "anthropic"',
+        ):
+            with self.subTest(source=source):
+                self.assertFalse(is_local_runtime_reference(path, source, patterns))
+
     def checker(self, *extra: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         child_environment = os.environ.copy()
         child_environment.update(environment or {})

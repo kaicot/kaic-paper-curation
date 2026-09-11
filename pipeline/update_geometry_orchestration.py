@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from pipeline.lib.run_state import (
     RunStatus,
 )
 from pipeline.runtime_policy import RuntimePolicy
+from pipeline.python_runtime import resolve_runtime
 
 
 def _atomic_write_json(path: Path, value: object) -> None:
@@ -48,10 +48,8 @@ def policy_digest(policy: RuntimePolicy) -> str:
 
 
 def approved_python() -> str:
-    executable = Path(sys.executable).resolve()
-    if executable.name.lower() not in {"python.exe", "python3.12", "python"}:
-        raise RuntimeError("approved Python executable is unavailable")
-    return str(executable)
+    """Use the project last-known-good runtime for every spawned stage."""
+    return str(resolve_runtime().executable)
 
 
 POLICY_SCRIPTS: Final = {

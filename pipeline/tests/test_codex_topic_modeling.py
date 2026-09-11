@@ -106,7 +106,7 @@ def _identity_factory(**values: object) -> CacheIdentity:
         runtime_mode="codex",
         capability="generation",
         role=role,
-        model="gpt-5.6-luna" if role == "short_form" else "gpt-5.6-terra",
+        model="gpt-5.6-luna" if role == "topic_labels" else "gpt-5.6-terra",
         reasoning_effort="xhigh",
         cli_version="0.147.0",
         signed_binary_sha256="1" * 64,
@@ -294,7 +294,7 @@ class CodexTopicModelingTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(
                 [role for role, _schema in gateway.calls],
-                ["short_form", "short_form", "short_form", "long_form"],
+                ["topic_labels", "topic_labels", "topic_labels", "connections"],
             )
             self.assertEqual(connections, {"001_A": [], "002_B": []})
             self.assertEqual(completed, {"001_A", "002_B"})

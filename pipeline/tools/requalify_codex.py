@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicitly accept or verify the locally signed saved-auth Codex binary."""
+"""Qualify a signed Codex candidate, or check last-good state without generation."""
 
 from __future__ import annotations
 
@@ -22,30 +22,37 @@ def _canonical(value: JsonObject) -> bytes:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Qualify the exact signed Codex CLI saved-auth boundary")
+    parser = argparse.ArgumentParser(description="Qualify or verify the signed Codex CLI saved-auth boundary")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--accept-current-signed-binary", action="store_true")
-    mode.add_argument("--verify-only", action="store_true")
+    mode.add_argument("--verify-only", action="store_true", help="No generation and no qualification-state write")
+    parser.add_argument("--role", action="append", help="Role to canary while accepting; repeat as needed")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
     try:
         gateway = CodexGateway.production(ROOT)
-        attestation = gateway.requalify(accept=args.accept_current_signed_binary)
+        if args.role and not args.accept_current_signed_binary:
+            parser.error("--role requires --accept-current-signed-binary")
+        attestation = gateway.requalify(
+            accept=args.accept_current_signed_binary,
+            roles=args.role,
+        )
+        raw_routes = attestation.get("qualified_routes")
         result: JsonObject = {
             "attestation_sha256": hashlib.sha256(_canonical(attestation)).hexdigest(),
             "binary_sha256": attestation["binary_sha256"],
-            "canary_output_sha256": attestation["canary_output_sha256"],
+            "cache_compatibility_epoch": attestation["cache_compatibility_epoch"],
             "cli_version": attestation["cli_version"],
             "contract_sha256": attestation["contract_sha256"],
             "mode": "accepted" if args.accept_current_signed_binary else "verified",
             "policy_sha256": attestation["policy_sha256"],
-            "roles": attestation["roles"],
-            "schema": "codex-requalification-result-v1",
-            "schema_version": 1,
+            "qualified_route_count": len(raw_routes) if isinstance(raw_routes, dict) else 0,
+            "schema": "codex-requalification-result-v2",
+            "schema_version": 2,
             "status": "PASS",
         }
     except CodexGatewayError as error:
-        result = {"code": error.code, "schema": "codex-requalification-result-v1", "schema_version": 1, "status": "FAIL"}
+        result = {"code": error.code, "schema": "codex-requalification-result-v2", "schema_version": 2, "status": "FAIL"}
     encoded = _canonical(result)
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)

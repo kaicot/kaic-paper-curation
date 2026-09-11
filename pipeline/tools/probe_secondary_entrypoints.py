@@ -166,6 +166,7 @@ def run_probe(
         finding
         for finding in scan_worktree(PROJECT_ROOT, patterns, scanner)
         if finding.get("path") != "pipeline/providers/paid_compat.py"
+        and finding.get("classification") != "local-runtime-reference"
     ]
     if unexpected:
         paths = ",".join(

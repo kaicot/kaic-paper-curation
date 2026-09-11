@@ -109,11 +109,11 @@ class GenerationCacheTests(unittest.TestCase):
                     task_id="review:001",
                 )
 
-                # Then: binary and contract requalification independently invalidate the cache.
+                # Then: a qualified binary update preserves reuse; contract changes do not.
                 self.assertEqual(first.cli_version, second.cli_version)
                 self.assertNotEqual(first.signed_binary_sha256, second.signed_binary_sha256)
                 self.assertNotEqual(first.attestation_sha256, second.attestation_sha256)
-                self.assertNotEqual(first.digest, second.digest)
+                self.assertEqual(first.digest, second.digest)
                 self.assertEqual(second.signed_binary_sha256, third.signed_binary_sha256)
                 self.assertNotEqual(second.contract_sha256, third.contract_sha256)
                 self.assertNotEqual(second.attestation_sha256, third.attestation_sha256)
