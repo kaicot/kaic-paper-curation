@@ -10,6 +10,8 @@
 `.worktrees`, `.omo`, `config.json`은 게시하지 않는다. GitHub 업로드는 이 작업과 별도다.
 
 `scripts/update-source-snapshot.ps1` 또는 로컬 post-commit 훅으로 보관본을 갱신한다.
+새 작업 저장소에서는 `scripts/install-source-snapshot-hook.ps1`로 훅을 설치한다. 기존 훅이나
+공유된 외부 hooks 경로는 자동으로 덮어쓰지 않는다. 보관본 갱신에 실패해도 로컬 커밋은 보존된다.
 대상 위치 설정은 작업 원본의 `.omo/source-snapshot-config.json`이며 Git에 포함하지 않는다.
 보관본의 `.source-snapshot.json`에는 커밋 번호·원본 위치·파일 해시·생성 시각을 기록한다.
 직접 편집한 보관 파일이 있으면 갱신을 중단하며, 관리 목록에 없는 파일은 삭제하지 않는다.
