@@ -35,7 +35,7 @@ description: "kaicot 포크의 논문 자동 큐레이션 풀 파이프라인 (P
 
 특정 슬러그만 다루라는 요청 (`088,1093 다시`)이 있으면 `--slugs A,B,C` 와 함께 `--mode rebuild --strict-pdf` 사용.
 
-> ⚠️ `deploy` 모드는 제거되었다 (`--mode deploy` 는 exit 2). "배포해줘" 요청에는 로컬 서버(`serve_local.py`) 열람을 안내한다.
+> ⚠️ 배포 기능은 없다 (`--mode deploy` 는 exit 2). "배포해줘" 요청에는 로컬 서버(`serve_local.py`) 열람을 안내한다.
 
 </Trigger_To_Mode>
 
@@ -129,9 +129,8 @@ PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source web
 </Use_When>
 
 <Do_Not_Use_When>
-- 단일 논문 추가 → `zotero-add` 스킬
-- 단일 논문 리뷰 → `paper-review` 스킬
-- 보고서 작성용 자료 수집 → `report-gen` 스킬
+- 문서에 실린 참고문헌 목록을 Zotero에 메타데이터로 일괄 등록 → `kaic-zotero-push` 스킬
+- 투고 원고의 심사(peer review) 의견 작성 → `kaic-peer-review` 스킬
 </Do_Not_Use_When>
 
 <Safety>
@@ -139,7 +138,7 @@ PYTHONUTF8=1 python pipeline/run_full.py --topic ai4s --mode curate --source web
 - 사용자가 "force update" 같은 표현을 써도, `--slugs` 범위 제한이 가능하면 그 쪽을 먼저 제안.
 - 생성은 Codex saved-auth 만 사용. `--llm-mode off` 는 생성 단계를 전부 건너뛰고 결정론 단계만 실행한다 (정책 거부 exit 3). 유료 API 키 설정(`allow_paid_api: true`)은 영구 거부.
 - Codex 크레딧 소진 시 생성 단계가 실패 처리된다 — `--resume` 으로 재충전 후 이어서 실행. 유료 키 fallback 없음.
-- Phase 3 이후 모든 review.md 는 schema v1 frontmatter 를 가진다. 원본은 `docs/papers/.legacy/{slug}_v0.md` 백업.
+- 모든 review.md 는 schema v1 frontmatter 를 가진다. 변환 전 원본은 `docs/papers/.legacy/{slug}_v0.md` 에 백업돼 있다.
 </Safety>
 
 <Programmatic_API>
