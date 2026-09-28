@@ -81,8 +81,14 @@ LLM(에이전트)은 아래 순서를 따른다:
 ### 1. 스킬 제거
 
 ```powershell
-# 설치된 스킬 디렉토리 삭제
-Remove-Item -LiteralPath "$env:USERPROFILE\.codex\skills\kaic-paper-curation" -Recurse -Force
+# 설치된 스킬 디렉토리 삭제. 정션(링크)이면 링크만 지운다: 링크에 -Recurse를 쓰면
+# Windows PowerShell 5.1이 연결된 원본 폴더의 내용까지 지울 수 있다.
+$skill = "$env:USERPROFILE\.codex\skills\kaic-paper-curation"
+if ((Get-Item -LiteralPath $skill -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    cmd /c rmdir "$skill"
+} else {
+    Remove-Item -LiteralPath $skill -Recurse -Force
+}
 ```
 
 ### 2. config / 로컬 산출물 제거
