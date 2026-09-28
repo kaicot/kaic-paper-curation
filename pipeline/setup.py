@@ -215,6 +215,16 @@ def install_skill(
     ):
         raise SetupError("skill-source-invalid", 2)
     destination = _skill_destination(profile)
+    if destination.is_junction():
+        # A junction here links to a skill folder that other agents share. Replace
+        # only SKILL.md inside it; replacing the directory would turn this agent's
+        # entry into a separate copy and leave the shared folder stale.
+        if not replace:
+            raise SetupError("exists")
+        staged_skill = destination / ".SKILL.md.stage"
+        _ = staged_skill.write_bytes(shipped.read_bytes())
+        os.replace(staged_skill, destination / "SKILL.md")
+        return destination
     if destination.exists() or destination.is_symlink():
         if not replace:
             raise SetupError("exists")
