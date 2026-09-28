@@ -1,6 +1,6 @@
 ---
 name: kaic-paper-curation
-description: "kaicot 포크의 논문 자동 큐레이션 풀 파이프라인 (Paper Curation kaicot fork). PDF/주소로 논문을 Zotero에 등록하고, 리뷰·분류·검색 페이지까지 자동 생성. 트리거: '@kaic-paper-curation', '논문 큐레이션', '이 논문 넣어줘', '이 주소 논문 넣어줘', '논문 리뷰해줘', '최신 논문 찾아줘', '논문 수집', 'kaic paper curation', '오늘 나온 논문', 'curate papers', '논문 모니터링'."
+description: "kaicot 포크의 논문 자동 큐레이션 풀 파이프라인 (Paper Curation kaicot fork). PDF·URL로 받은 논문을 Zotero에 등록할 때, 최신 논문을 찾아 모으거나 모니터링할 때, Zotero 컬렉션의 논문을 리뷰·분류해 로컬 검색 페이지로 만들 때 사용한다. '@kaic-paper-curation'으로 직접 호출할 수 있다."
 ---
 
 # Paper Curation — Dispatcher
