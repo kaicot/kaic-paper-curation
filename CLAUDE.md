@@ -1,38 +1,16 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with this repository.
-It is the Claude-equivalent of `AGENTS.md` — read `AGENTS.md` for the full
-instructions. Key rules repeated here:
+Claude Code가 이 저장소에서 작업할 때는 `AGENTS.md`를 먼저 읽는다.
+사용자 요청의 스킬 진입점은 `SKILL.md`이며, 설치본에는 SKILL.md만 있으므로 실행 checkout을 확인한 뒤 그곳의 필요한 운영 문서만 읽는다.
 
-## Hard rules
+특히 다음 경계를 유지한다:
 
-- **Never interact with the upstream repo** (`jehyunlee/paper-curation`): no PR,
-  issue, push, fetch/merge, or sync. This is the kaicot fork and is operated
-  independently (owner instruction 2026-08-13).
-- Skill name and invocation is always `kaic-paper-curation`.
-- This fork is **local-only**: no Cloudflare deploy, no `wrangler.toml`, no
-  `prepare_deploy.py`, no `worker/`, no gh-pages. Results are served by
-  `pipeline/serve_local.py` at `http://localhost:8000/{topic}/`.
-- Generation uses **Codex saved-auth (ChatGPT login)** only. Paid API fallback
-  is permanently denied (`allow_paid_api: false`). `--llm-mode off` runs
-  deterministic stages only.
+- 원본 작업은 `D:\workspace\kaic-paper-curation`; OneDrive 폴더는 소스 보관본이다.
+- 원작 `jehyunlee/paper-curation` 및 upstream과의 fetch/pull/merge/push·PR·이슈·동기화는 금지한다.
+- 등록은 기본 등록→리뷰, "등록만"은 `--no-run`이다. 조회·진단·유지보수는 생성 요청이 아니다.
+- 로컬 Zotero 감지는 읽기 전용이며 API 쓰기 권한을 대신하지 않는다.
+- 생성은 Codex saved-auth만 사용하고 유료 API fallback과 공개 웹 배포는 지원하지 않는다.
+- 대화 에이전트의 모델 선택을 파이프라인 역할 설정에 자동 적용하지 않는다.
+- 실제 결과와 페이지 응답으로 완료를 확인하고, 조회만 한 경우 서버를 시작하지 않는다.
 
-## User experience principle
-
-The user is a beginner who does not type commands. The LLM/agent does
-everything: install wizard (one question at a time), daily-use wizard
-(request → command mapping), and result URL guidance
-(`http://localhost:8000/{topic}/`).
-
-## Key entry points
-
-| Tool | Purpose |
-|---|---|
-| `pipeline/run_full.py` | Single orchestrator (`--mode/--source/--images`) |
-| `pipeline/tools/add_paper_to_zotero.py` | Register a paper from PDF/URL (auto collection) |
-| `pipeline/tools/inspect_local_zotero.py` | Read local Zotero collections/PDF state |
-| `pipeline/serve_local.py` | Local server (localhost:8000) |
-| `pipeline/setup.py` | Setup + skill install (`--install-skill`) |
-
-See `AGENTS.md`, `docs/setup-guide.md`, `docs/operations.md`, and
-`docs/architecture.md` for details.
+세부 실행 제한·복구·삭제는 `docs/operations.md`, 설치는 `docs/setup-guide.md`를 참조한다.

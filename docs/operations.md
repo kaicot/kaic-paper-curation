@@ -20,58 +20,90 @@
 
 ## 파이프라인 개요
 
-`run_full.py` 가 단일 진입점이다. 3축:
+`run_full.py`는 큐레이션 진입점이다. PDF/URL 등록은 `tools/add_paper_to_zotero.py`, 설치는 `setup.py`, 열람은 `serve_local.py`를 별도로 사용한다. 3축:
 
-- `--mode`: `curate`(기본) / `reclassify` / `retime` / `audit` / `fix-matching` / `dedup` / `validate`
+- `--mode`: `curate`(기본) / `rebuild` / `reclassify` / `retime` / `audit` / `fix-matching` / `dedup` / `validate`
 - `--source`: `zotero`(기본) / `web` / `fixture`
 - `--images`: `skip`(기본) / `changed` / `all`
 
-`--mode deploy` 는 **제거됨** (exit 2). "배포" 는 로컬 서버(`serve_local.py`) 열람을 의미한다.
+`--mode deploy`는 제거됨(exit 2). 로컬 열람만 지원하며 공개 배포 요청을 로컬 열람으로 임의 실행하지 않는다. GitHub 소스 릴리스와 웹 서비스 배포는 별개의 작업이다.
 
 ## 주요 명령
 
+아래는 Bash 예시이며 `python`은 검증된 프로젝트 런타임을 가리킨다. PowerShell은 아래 Python 환경 절의 실행 파일·환경변수 선택을 따른다.
+`mypapers`는 예시 alias다. 실제 설정된 topic을 사용한다. URL 등록은 로컬 PDF 첨부를 보장하지 않으므로 등록 결과의 `pdf_attached`와 원문 접근을 별도로 확인한다.
+
 ```bash paper-curation-command
 # 매일 — Zotero 컬렉션 신규 논문 리뷰
-PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode curate --source zotero
+PYTHONUTF8=1 python pipeline/run_full.py --topic mypapers --mode curate --source zotero
 
 # 웹 검색 + Zotero 등록 + 리뷰 (이번 주 논문)
-PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode curate --source web --days 7
+PYTHONUTF8=1 python pipeline/run_full.py --topic mypapers --mode curate --source web --days 7
 
 # 분류만 다시
-PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode reclassify
+PYTHONUTF8=1 python pipeline/run_full.py --topic mypapers --mode reclassify
 
-# 타임라인만 다시
-PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode retime --images all
+# 타임라인만 다시 (지원되는 기본 이미지 정책 유지)
+PYTHONUTF8=1 python pipeline/run_full.py --topic mypapers --mode retime
 
 # 실행 계획 미리보기 (변경 없음)
-PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode curate --dry-run
+PYTHONUTF8=1 python pipeline/run_full.py --topic mypapers --mode curate --dry-run
 
 # 결과 보기
 PYTHONUTF8=1 python pipeline/serve_local.py   # http://localhost:8000/<토픽>/
 
 # PDF/URL로 Zotero 등록 (컬렉션 자동 생성 + curation)
-PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --pdf paper.pdf --collection "내 논문"
-PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --url https://arxiv.org/abs/2401.00001 --collection "내 논문"
+PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --pdf paper.pdf --collection "내 논문" --topic mypapers
+PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --url https://arxiv.org/abs/2401.00001 --collection "내 논문" --topic mypapers
 
-# 로컬 Zotero 확인 (API 키 없이)
+# 등록만 (리뷰·생성 안 함; API 쓰기 권한은 필요)
+PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --pdf paper.pdf --collection "내 논문" --topic mypapers --no-run
+
+# 로컬 Zotero 확인 (읽기 전용, API 키 없이)
 PYTHONUTF8=1 python pipeline/tools/inspect_local_zotero.py
 ```
 
-## 안전 플래그
+## 안전 플래그와 실제 제한
 
-| 플래그 | 효과 |
+| 옵션/모드 | 현재 실행 의미 |
 |---|---|
-| `--strict-pdf` | fuzzy 매칭 차단, ID(DOI/arXiv)로만 PDF 매칭 |
-| `--slugs A,B,C` | 특정 논문만 처리 |
-| `--dry-run` | 실행 계획만 출력 (변경 0) |
-| `--skip-dedup` / `--dedup-execute` | Zotero 중복 검사 제어 |
-| `--insights` | 크로스카테고리 인사이트 생성 (opt-in) |
-| `--llm-mode off` | 결정론 단계만 (Codex 생성 거부, exit 3) |
+| `--strict-pdf` | fuzzy 매칭을 차단하고 검증된 PDF 연결을 우선 사용 |
+| `--slugs A,B` | 리뷰/재생성 대상 제한. 도구 모드에 자동 전달된다고 가정하지 않음 |
+| `--dry-run` | 부작용 없이 계획 JSON 출력. 연결·생성·파일 성공 보장은 아님 |
+| `--llm-mode off` | 현재 run_full 전체 실행을 정책 거부(exit 3); 결정론 단계 완료가 아님 |
+| `--mode rebuild` | 기존 리뷰 재생성. 명시적 대상·백업 확인 후에만 실행 |
+| `--mode dedup` / `fix-matching` | 하위 도구 기본 미리보기. `--yes`를 붙여도 삭제 실행으로 전환되지 않음 |
+
+현재 안전 프로파일은 동시성 1과 `--images skip`만 허용한다.
+`--images changed/all`, `--insights`, `--local-fallback`, `--dedup-execute`는 실행 시 exit 2로 거부한다.
+파서가 옵션을 받아들이거나 dry-run이 성공해도 실제 실행 지원으로 해석하지 않는다.
+`--yes`는 상위 파서에 있으나 강제 확인/하위 삭제 실행 플래그가 아니다.
+
+실제 삭제는 하위 `dedup_zotero.py` / `fix_matching.py`의 `--execute` 경로다.
+삭제 요청이 있을 때만 해당 도구의 `--help`와 소스를 확인하고 미리보기 결과·정확한 item/slug 범위·백업을 사용자에게 제시한다.
+상위 안전 경로가 거부한 기능을 직접 호출로 자동 우회하지 않는다.
 
 ## Python 환경
 
 - **검증된 Python 3.12 계열**을 사용한다. 시스템 Python이나 `py` 연결이 변경되어도 프로젝트 런타임을 우선 선택한다. 패치 업데이트는 별도 후보 환경에서 의존성과 실행 검사를 통과한 뒤 적용한다. 다른 minor 계열은 호환성 정책 변경 전 자동 채택하지 않는다.
-- Windows: 모든 명령에 `PYTHONUTF8=1`.
+- Bash에서는 `PYTHONUTF8=1 python ...`, PowerShell에서는 아래처럼 환경변수를 별도로 설정한다.
+- 이 PC의 활성 런타임은 `.omo/runtime/python312-active.json`으로 선택한다. 예시를 저장소 루트에서 실행하고 공통 선택기로 검증한다. 활성 기록이 없으면 setup/런타임 준비 절차를 따르며 시스템 Python으로 우회하지 않는다.
+
+```powershell
+$env:PYTHONUTF8 = '1'
+$curationRuntime = Get-Content -LiteralPath .omo/runtime/python312-active.json -Raw | ConvertFrom-Json
+$curationPython = Join-Path $curationRuntime.runtime_dir 'Scripts/python.exe'
+if (-not (Test-Path -LiteralPath $curationPython -PathType Leaf)) {
+    $curationPython = Join-Path $curationRuntime.runtime_dir 'python.exe'
+}
+if (-not (Test-Path -LiteralPath $curationPython -PathType Leaf)) { throw 'Project Python unavailable' }
+& $curationPython -B -c "from pipeline.python_runtime import resolve_runtime; print(resolve_runtime().executable)"
+if ($LASTEXITCODE -ne 0) { throw 'Project runtime validation failed' }
+& $curationPython -B pipeline/run_full.py --topic mypapers --mode curate --dry-run
+```
+
+이후 PowerShell 명령은 `& $curationPython -B pipeline/<도구>.py ...`로 실행한다.
+
 - SPECTER2 모델 캐시: `.cache/` (없으면 `prepare_local_models.py --specter2` 로 준비).
 
 ## 한국 망 우회
@@ -91,11 +123,15 @@ arXiv 429 가 잦으면 `search_papers.py --skip-arxiv` (OpenAlex+S2 만).
 모든 `review.md` 는 `---` + `schema_version: v1` frontmatter 를 가진다.
 없으면 검증(`validate_default_artifacts`)이 실패한다. 생성 템플릿이 자동 포함.
 
-## 캐시·재개
+## 캐시·실패 복구
 
-- 각 단계는 상태 파일(`pipeline/_safe_update_state/`)로 추적된다.
-- 실패 시 이전 단계 해시 보존, `--resume` 으로 실패 단계부터 재실행.
-- LLM 생성은 `.llm_cache` 로 캐시 — 동일 입력이면 재호출 없음.
+- 단계 상태는 `pipeline/_safe_update_state/`, 생성 캐시는 실행 경로의 캐시 파일에 남는다. 상태/캐시 파일이 존재한다는 이유만으로 완료라고 보고하지 않는다.
+- 실패한 단계·종료 코드·topic·원래 인수를 확인한다. 등록 성공 후 리뷰가 실패하면 item key를 보존하고 **등록 명령을 반복하지 않는다**. 이후 해당 topic의 curate 경로를 검토한다.
+- `run_full.py`에는 `--resume`이 없다. 먼저 같은 범위의 `--dry-run`으로 계획을 확인하고 실행 상태·캐시를 확인한 뒤 재실행한다. 상위 전체 실행에는 동기화 같은 외부 단계도 포함되므로 무조건 재시도하지 않는다.
+- 하위 `run_update_force.py`는 resume/checkpoint와 mode별 상태 처리가 있으나, 범용 "실패 단계부터 재개"를 보장하는 상위 옵션으로 안내하지 않는다. 하위 도구를 직접 사용할 필요가 있으면 해당 모드의 실제 lease/checkpoint 처리와 `--help`를 먼저 확인한다.
+- 크레딧 소진 시 생성 실패를 보고하고 충전 후 재개 범위를 확인한다. 유료 API 또는 다른 모델로 자동 전환하지 않는다.
+- `SAFE RUN OWNERSHIP DENIED`는 동시 실행·활성 lease·재개 요구 등 원인이 있다. alias 변경이나 상태 파일 삭제로 우회하지 말고 원인과 소유 실행을 확인한다.
+- 보고에는 등록·리뷰·검증·실패 수를 분리한다. 기존 리뷰 포함 전체 수를 이번 실행의 성공 수로 표현하지 않는다.
 
 ## 모델·도구 업데이트
 
@@ -123,10 +159,10 @@ CLI의 버전·경로·해시는 로컬 검증 기록이고, 필요한 격리·�
 
 ```powershell
 $env:PYTHONUTF8 = '1'
-& .\.tools\python312\python.exe pipeline/tools/requalify_codex.py --verify-only
-& .\.tools\python312\python.exe pipeline/tools/requalify_codex.py --accept-current-signed-binary
-& .\.tools\python312\python.exe pipeline/tools/bootstrap_python_runtime.py --check-only --project-root .
-& .\.tools\python312\python.exe pipeline/tools/bootstrap_python_runtime.py --list-candidates --project-root .
+& $curationPython pipeline/tools/requalify_codex.py --verify-only
+& $curationPython pipeline/tools/requalify_codex.py --accept-current-signed-binary
+& $curationPython pipeline/tools/bootstrap_python_runtime.py --check-only --project-root .
+& $curationPython pipeline/tools/bootstrap_python_runtime.py --list-candidates --project-root .
 ```
 
 Python은 `--stage-candidate <탐색된-python.exe-경로>`로 별도 환경을 설치·검증하고,
@@ -178,10 +214,18 @@ python pipeline/evaluate_retrieval.py \
 |---|---|
 | `ModuleNotFoundError: config_loader` | 저장소 루트에서 실행 (패키지 경로 자동 삽입) |
 | PDF 를 못 찾음 (`no_pdf`) | Zotero 앱에서 동기화 → PDF 로컬 다운로드 확인 |
-| `SAFE RUN OWNERSHIP DENIED` | 토픽 alias 를 영문 소문자·숫자로 (한글 금지) |
+| `SAFE RUN OWNERSHIP DENIED` | 실패 코드·동시 실행·활성 lease 및 재개 상태 확인 |
 | 분류 실패 (`specter2`) | `.cache/` 준비 (`prepare_local_models.py --specter2`) |
-| 크레딧 소진 | 생성 단계 실패 → 재충전 후 `--resume` |
+| 크레딧 소진 | 생성 단계 실패 보고 → 충전 후 원래 topic·실패 단계·재개 상태 확인 |
 
 ## 삭제 (포크 제거)
 
-전체 제거 절차는 `AGENTS.md` 의 "삭제 방법" 참고.
+삭제 요청의 범위를 먼저 확인한다. 스킬 연결만 제거하는 것과 코드·개인 설정·리뷰를 모두 제거하는 것은 다르다.
+
+1. `~/.codex/skills/kaic-paper-curation` 및 `~/.claude/skills/kaic-paper-curation`의 실제 경로·정션 대상을 확인한다.
+   정션에 재귀 삭제를 적용하지 않는다. 연결만 제거할 때 공유 대상 `~/skills/kaic-paper-curation`은 보존한다.
+2. 산출물 제거가 요청된 경우 정확한 topic과 `docs/papers`의 공유 범위를 확인하고 PDF·리뷰·인덱스·상태를 복구 가능한 별도 위치에 백업한다.
+   API 키가 있는 설정의 백업은 접근을 제한하고 원격/OneDrive 소스 보관본에 넣지 않는다.
+3. 대상별로 승인된 설정·캐시·산출물만 제거한다. 다른 topic이 참조하는 PDF/리뷰나 OneDrive 보관본을 자동 삭제하지 않는다.
+4. 저장소 전체 제거가 명시된 경우 실행 중 프로세스와 절대 경로를 재확인한다. 프로젝트 밖의 홈/작업공간 루트를 재귀 삭제 대상으로 삼지 않는다.
+5. 제거한 항목과 복구 방법을 보고한다. Git clone은 **커밋된 코드만** 복구한다. 로컬 PDF·리뷰·비공개 설정은 별도 백업 없이는 복구된다고 보장하지 않는다.

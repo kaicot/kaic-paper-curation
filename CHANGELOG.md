@@ -5,6 +5,22 @@ All notable project changes are recorded here.
 The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`). The project
 version is independent from the pinned Codex CLI version.
 
+## [0.2.1] - 2026-10-04
+
+### Changed
+
+- Condense SKILL.md into request routing, checkout resolution, selective repository-document loading, and concrete execution gotchas.
+- Preserve default PDF/URL registration followed by curation; honor register-only requests with `--no-run`.
+- Separate read-only status/maintenance from ingestion, generation, server startup, and persistent monitoring.
+- Align AGENTS.md and CLAUDE.md with repository guidance; distinguish agent model selection from pipeline role configuration.
+- Correct keyless inspection versus Zotero API write requirements, PowerShell examples, unsupported safe-profile flags, and misleading resume/delete guidance.
+- Document observable registration, review, artifact-validation and page-readiness outcomes separately.
+
+### Included since v0.2.0
+
+- This release also packages already committed local-only fork documentation, validated project-runtime/model-role handling, source-snapshot publication, trigger refinements, and junction-preserving skill installation.
+- This release's new diff is instructions/documentation and VERSION only. Pipeline code, model configuration, private settings, real PDFs and existing reviews are not modified.
+
 ## [0.2.0] - 2026-08-13
 
 First real-world usage release: the pipeline was run end-to-end on a real

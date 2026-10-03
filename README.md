@@ -1,5 +1,7 @@
 # Paper Curation — 논문 리뷰 자동화 도우미
 
+현재 프로젝트 버전: **0.2.1** (`VERSION` 기준).
+
 작업 원본: `D:\workspace\kaic-paper-curation`. OneDrive의 같은 이름 폴더는 커밋된 소스 보관본입니다.
 실행 환경·캐시·논문과 리뷰·Git 이력은 D 드라이브 작업 원본에 보관합니다.
 
@@ -27,13 +29,13 @@ Codex(또는 ChatGPT의 Codex)에게 아래 한 줄을 보내세요:
 
 > **"여기에 kaic-paper-curation 설치해줘: https://github.com/kaicot/kaic-paper-curation"**
 
-그러면 LLM이 **한 번에 하나씩** 물어봅니다. 물어보는 대로 답하면 됩니다:
+그러면 LLM이 알려진 설정을 재사용하고 **필요한 정보만 하나씩** 물어봅니다:
 
 1. "Codex 로그인이 되어 있나요?" → `codex login status` 확인 후 "되어 있어요" 또는 안내대로 진행
 2. "Zotero에 논문을 넣어두셨나요?" → **아니면 아래 0단계부터**
 3. "리뷰할 Zotero 컬렉션 이름이 뭔가요?" → Zotero 앱에서 만든 폴더 이름
 4. "이 컬렉션을 뭐라고 부를까요?" → 아무 영문 이름 (예: `mypapers`)
-5. 설치 완료 → "브라우저에서 이 주소를 여세요"라고 알려줌
+5. 설치 완료 → 요청한 첫 리뷰가 완료되고 페이지를 확인하면 열람 주소 안내
 
 > 💡 **스킬로 부르기**: 설치가 끝나면 Codex 입력창에 `@`를 누르고
 > `kaic-paper-curation` 을 선택하면 됩니다. 이후 PDF 드래그 앤 드롭이나
@@ -50,7 +52,7 @@ LLM이 Zotero 컬렉션을 자동으로 만들고, 논문을 등록하고, 리�
 PDF는 로컬 파일로 연결되므로 **Zotero 클라우드 저장공간이 없어도** 됩니다.
 
 > 💡 Zotero 앱이 없어도? LLM이 Zotero 설치·가입 방법을 단계별로 안내해 드립니다.
-> Zotero API 키가 없어도 **로컬 Zotero를 감지해서** 진행할 수 있습니다.
+> API 키 없이 **로컬 컬렉션·PDF를 조회**할 수 있습니다. 자동 등록과 API 동기화에는 Zotero API 권한과 사용자 ID가 필요합니다.
 
 ### 2단계 — 매일 사용 (말만 하면 됩니다)
 
@@ -58,11 +60,15 @@ PDF는 로컬 파일로 연결되므로 **Zotero 클라우드 저장공간이 �
 |---|---|
 | 논문 리뷰/정리 | "새 논문 리뷰해줘" |
 | 논문 추가 | "이 논문 넣어줘" + PDF 또는 주소 |
+| 리뷰 없이 등록 | "이 논문 등록만 해줘" + PDF 또는 주소 |
 | 웹에서 새 논문 찾기 | "이번 주 논문 찾아줘" |
 | 결과 보기 | "웹에서 보고 싶어" |
 | 분류 다시 하기 | "분류 다시 해줘" |
 | 진행 상황 | "몇 편 리뷰됐어?" |
 | 컬렉션 목록 | "무슨 컬렉션 있어?" |
+
+진행 조회·컬렉션 목록·스킬 유지보수는 논문 등록이나 생성 요청이 아닙니다. 조회만 할 때 서버를 시작하지 않습니다.
+등록 성공 후 리뷰가 실패하면 두 결과를 구분해서 알려드립니다.
 
 ### 3단계 — 결과 보기
 
@@ -86,16 +92,14 @@ PDF는 로컬 파일로 연결되므로 **Zotero 클라우드 저장공간이 �
 
 **Q. 이거 삭제하고 싶어요. 어떻게 하나요?**
 LLM에게 "kaic-paper-curation 삭제해줘"라고 말하면 됩니다. LLM이 스킬·config·생성된
-리뷰를 정리해 드립니다. 수동 절차는 [AGENTS.md](AGENTS.md)의 "삭제 방법"에
-있습니다.
+리뷰를 정리하기 전에 삭제 범위와 백업을 확인합니다. 절차는 [운영 문서의 삭제 절](docs/operations.md#삭제-포크-제거)에 있습니다.
 
 **Q. Zotero를 안 써봤어요.**
 괜찮습니다. LLM이 Zotero 설치 → 가입 → 컬렉션 만들기 → 논문 넣기까지
 단계별로 안내하고, 심지어 **대신 등록해 주기도** 합니다.
 
 **Q. API 키가 뭔가요?**
-유료 API 키는 **필요 없습니다**. Zotero API 키가 없어도 로컬 Zotero가 있으면
-진행됩니다. LLM이 필요할 때 발급 방법을 안내합니다.
+유료 모델 API 키는 **필요 없습니다**. API 키 없이 로컬 Zotero의 준비 상태를 조회할 수 있으나, 자동 등록에는 Zotero API 쓰기 키와 사용자 ID가 필요합니다. LLM이 필요한 권한을 안내합니다.
 
 **Q. 비용이 드나요?**
 생성은 ChatGPT 구독에 포함된 Codex 크레딧을 사용합니다. 유료 API 키 기반
@@ -139,16 +143,23 @@ Paper Curation은 Zotero에 있는 논문 PDF를 읽어서:
 
 ### 명령어
 
+아래는 Bash 예시입니다. `python`은 검증된 프로젝트 Python 3.12를 가리켜야 합니다.
+Windows PowerShell은 [운영 문서의 Python 환경](docs/operations.md#python-환경)에 있는 런타임 선택·`$env:PYTHONUTF8` 예시를 사용합니다.
+`mypapers`는 예시이므로 실제 설정한 topic으로 바꿉니다.
+
 ```bash paper-curation-command
 # Zotero 컬렉션 논문 리뷰·분류·인덱스
-PYTHONUTF8=1 python pipeline/run_full.py --topic <토픽> --mode curate --source zotero
+PYTHONUTF8=1 python pipeline/run_full.py --topic mypapers --mode curate --source zotero
 
 # 결과 보기
 PYTHONUTF8=1 python pipeline/serve_local.py
 
 # PDF/URL로 Zotero 등록 (컬렉션 자동 생성 + curation)
-PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --pdf paper.pdf --collection "내 논문"
-PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --url https://arxiv.org/abs/2401.00001 --collection "내 논문"
+PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --pdf paper.pdf --collection "내 논문" --topic mypapers
+PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --url https://arxiv.org/abs/2401.00001 --collection "내 논문" --topic mypapers
+
+# 리뷰 없이 등록 (API 쓰기 권한은 여전히 필요)
+PYTHONUTF8=1 python pipeline/tools/add_paper_to_zotero.py --pdf paper.pdf --collection "내 논문" --topic mypapers --no-run
 
 # 로컬 Zotero 컬렉션/PDF 상태 확인
 PYTHONUTF8=1 python pipeline/tools/inspect_local_zotero.py
@@ -159,6 +170,8 @@ PYTHONUTF8=1 python pipeline/doctor.py --format json
 
 ### 문서
 
+설치 스킬 폴더에는 `SKILL.md`만 있습니다. 스킬은 실행 checkout을 먼저 확인한 뒤 아래 문서를 그 checkout 기준으로 읽습니다.
+
 | 문서 | 내용 |
 |---|---|
 | [Setup Guide](docs/setup-guide.md) | 사전 준비 · 설치 · config.json · 문제 해결 |
@@ -168,6 +181,13 @@ PYTHONUTF8=1 python pipeline/doctor.py --format json
 ---
 
 ## 버전 관리 이력
+
+### [0.2.1] - 2026-10-04
+
+- 설치본과 실행 checkout을 구분하고 필요한 운영 문서만 읽도록 스킬 지침 압축
+- 등록만/조회/유지보수 경계, API 권한, 지원되지 않는 플래그와 복구 안내 교정
+- AGENTS·Claude 지침 및 PowerShell 명령 안내 정합화; 파이프라인 코드·모델·기존 리뷰는 변경하지 않음
+- v0.2.0 이후 누적된 로컬 실행/런타임·소스 보관본·정션 설치 개선을 포함하는 PATCH 릴리스
 
 ### [0.2.0] - 2026-08-13
 
